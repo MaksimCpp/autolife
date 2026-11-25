@@ -23,7 +23,7 @@ type apiError struct {
 	RequestID string   `json:"request_id"`
 }
 
-func Handler(logger *slog.Logger, maxBodyBytes int64, ready func(context.Context) error) http.Handler {
+func Handler(logger *slog.Logger, maxBodyBytes int64, ready func(context.Context) error, routes ...func(chi.Router)) http.Handler {
 	router := chi.NewRouter()
 	router.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,11 +37,11 @@ func Handler(logger *slog.Logger, maxBodyBytes int64, ready func(context.Context
 			defer func() {
 				if recover() != nil {
 					logger.Error("request handler panicked", "request_id", id)
-					writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Unexpected server error")
+					WriteError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Unexpected server error")
 				}
 			}()
 			if r.ContentLength > maxBodyBytes {
-				writeError(w, r, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "Request body exceeds the limit")
+				WriteError(w, r, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "Request body exceeds the limit")
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
@@ -49,32 +49,40 @@ func Handler(logger *slog.Logger, maxBodyBytes int64, ready func(context.Context
 		})
 	})
 	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 	})
 	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "HTTP method not allowed")
+		WriteError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "HTTP method not allowed")
 	})
 	router.Get("/health/live", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	router.Get("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if err := ready(r.Context()); err != nil {
-			writeError(w, r, http.StatusServiceUnavailable, "NOT_READY", "Service is not ready")
+			WriteError(w, r, http.StatusServiceUnavailable, "NOT_READY", "Service is not ready")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
+	for _, register := range routes {
+		register(router)
+	}
 	return router
 }
 
-func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+func RequestID(r *http.Request) string {
 	id, _ := r.Context().Value(requestIDKey{}).(string)
-	writeJSON(w, status, struct {
+	return id
+}
+
+func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	id := RequestID(r)
+	WriteJSON(w, status, struct {
 		Error apiError `json:"error"`
 	}{apiError{Code: code, Message: message, Fields: []string{}, RequestID: id}})
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
+func WriteJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)

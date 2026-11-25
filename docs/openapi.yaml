@@ -31,7 +31,703 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/auth/csrf:
+    get:
+      operationId: getAccountCSRF
+      parameters:
+      - name: pre
+        in: query
+        schema:
+          const: '1'
+        description: Issue a pre-auth context even when signed in.
+      responses:
+        '200':
+          description: Token for the active session or a short-lived pre-auth context
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - csrf_token
+                properties:
+                  csrf_token:
+                    type: string
+                    pattern: ^[A-Za-z0-9_-]{43}$
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/register:
+    post:
+      operationId: registerAccount
+      description: Requires an unexpired pre-auth cookie and its CSRF token.
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '202':
+          description: Generic acceptance
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/verify:
+    post:
+      operationId: verifyAccountEmail
+      description: Requires an unexpired pre-auth cookie and its CSRF token.
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - token
+              properties:
+                token:
+                  type: string
+                  pattern: ^[A-Za-z0-9_-]{43}$
+      responses:
+        '204':
+          description: Email verified
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/login:
+    post:
+      operationId: loginAccount
+      description: Requires an unexpired pre-auth cookie and its CSRF token.
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '200':
+          description: Session cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - email
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  email:
+                    type: string
+                    format: email
+                    maxLength: 254
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/logout:
+    post:
+      operationId: logoutAccount
+      security:
+      - session: []
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Current session revoked
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/password/forgot:
+    post:
+      operationId: requestPasswordReset
+      description: Requires an unexpired pre-auth cookie and its CSRF token.
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+      responses:
+        '202':
+          description: Generic acceptance
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/password/reset:
+    post:
+      operationId: resetAccountPassword
+      description: Requires an unexpired pre-auth cookie and its CSRF token.
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - token
+              - new_password
+              properties:
+                token:
+                  type: string
+                  pattern: ^[A-Za-z0-9_-]{43}$
+                new_password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '204':
+          description: Password reset and all sessions revoked
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/password/change:
+    post:
+      operationId: changeAccountPassword
+      security:
+      - session: []
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - current_password
+              - new_password
+              properties:
+                current_password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+                new_password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '204':
+          description: Password changed, current cookie rotated and other sessions revoked
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me:
+    get:
+      operationId: getOwnAccountProfile
+      security:
+      - session: []
+      responses:
+        '200':
+          description: Current account settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountProfile'
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: patchOwnAccountProfile
+      security:
+      - session: []
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                locale:
+                  enum:
+                  - ru
+                  - en
+                timezone:
+                  type: string
+                  maxLength: 128
+                theme:
+                  enum:
+                  - system
+                  - light
+                  - dark
+                notifications:
+                  type: boolean
+                analytics_consent:
+                  type: boolean
+      responses:
+        '200':
+          description: Updated account settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountProfile'
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: requestAccountDeletion
+      security:
+      - session: []
+      parameters:
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - confirm
+              properties:
+                confirm:
+                  const: true
+                current_password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '202':
+          description: Deletion durably accepted or receipt replayed
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/sessions:
+    get:
+      operationId: listOwnSessions
+      security:
+      - session: []
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Active sessions without credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AccountSession'
+                  next_cursor:
+                    type: string
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/sessions/{id}:
+    delete:
+      operationId: revokeOwnSession
+      security:
+      - session: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Owned session revoked
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/export:
+    post:
+      operationId: requestOwnExport
+      security:
+      - session: []
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                current_password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 256
+      responses:
+        '202':
+          description: Export durably accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/exports/{id}:
+    get:
+      operationId: getOwnExport
+      security:
+      - session: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Owner-scoped export status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - id
+                - state
+                - requested_at
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  state:
+                    enum:
+                    - requested
+                    - running
+                    - ready
+                    - failed
+                    - expired
+                  requested_at:
+                    type: string
+                    format: date-time
+                  expires_at:
+                    type: string
+                    format: date-time
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/exports/{id}/download:
+    post:
+      operationId: issueOwnExportLink
+      security:
+      - session: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: Origin
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Download link tied to the requesting session and expiring within
+            five minutes
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - url
+                properties:
+                  url:
+                    type: string
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/me/exports/{id}/content:
+    get:
+      operationId: downloadOwnExport
+      security:
+      - session: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: ticket
+        in: query
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Private JSON attachment
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          description: Request rejected or temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: __Host-autolife-session
+      description: The loopback development cookie is named autolife-session.
   schemas:
     Health:
       type: object
@@ -51,3 +747,68 @@ components:
             message: {type: string}
             fields: {type: array, items: {type: string}}
             request_id: {type: string}
+    AccountProfile:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - email
+      - locale
+      - timezone
+      - theme
+      - notifications
+      - analytics_consent
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        email_verified_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        locale:
+          enum:
+          - ru
+          - en
+        timezone:
+          type: string
+          maxLength: 128
+        theme:
+          enum:
+          - system
+          - light
+          - dark
+        notifications:
+          type: boolean
+        analytics_consent:
+          type: boolean
+        analytics_consent_updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    AccountSession:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - created_at
+      - expires_at
+      - current
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean

@@ -41,3 +41,9 @@ Go format, vet, unit/race, проверки хешей модулей, сбор�
 ## Документация
 
 [Продукт](docs/PRODUCT.md), [требования](docs/REQUIREMENTS.md), [архитектура](docs/ARCHITECTURE.md), [стек](docs/TECH_STACK.md), [безопасность](docs/SECURITY.md), [ADR](docs/adr) и [ROADMAP](docs/ROADMAP.md). Правила работы находятся в [AGENTS.md](AGENTS.md). Production deploy, платные сервисы и внешние аккаунты требуют отдельного разрешения.
+
+## Аккаунты
+
+После запуска откройте `http://127.0.0.1:8080/ru/account/register`. Письма подтверждения и восстановления доступны в Mailpit. Для существующего локального `.env` добавьте `AUTOLIFE_AUTH_SECRET` со значением из 32 случайных байтов в hex и сохраните прежние настройки PostgreSQL. Новый `.env` создаёт этот ключ автоматически. При смене локального адреса установите точный `AUTOLIFE_PUBLIC_ORIGIN`.
+
+Удаление хранит минимальный журнал в отдельном томе `restore-journal`. Сохраняйте этот том при операциях со снимками PostgreSQL. Браузерные тесты описаны в [TESTING](docs/TESTING.md).

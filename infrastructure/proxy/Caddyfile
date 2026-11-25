@@ -1,7 +1,13 @@
 :8080 {
+    header {
+        Referrer-Policy no-referrer
+        Content-Security-Policy "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'"
+    }
     @api path /api/v1 /api/v1/* /health/live /health/ready
     handle @api {
-        reverse_proxy api:8080
+        reverse_proxy api:8080 {
+            header_up X-Autolife-Client-IP {remote_host}
+        }
     }
     handle {
         reverse_proxy frontend:3000

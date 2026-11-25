@@ -4,7 +4,7 @@ WORKDIR /app
 RUN corepack enable && chown node:node /app
 USER node
 COPY --chown=node:node package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/pnpm-store,uid=1000,gid=1000 pnpm install --frozen-lockfile --store-dir=/pnpm-store
 COPY --chown=node:node . .
 ENV AUTOLIFE_API_ORIGIN=http://api:8080
 RUN pnpm build

@@ -33,3 +33,19 @@ select, button { min-height: 2.75rem; border-radius: .5rem; padding: .35rem .75r
 select { color: var(--text); background: var(--surface); border: 1px solid var(--focus); }
 button { color: white; background: var(--primary); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+.account-form { display: grid; gap: 1rem; }
+.account-field { display: grid; gap: .35rem; }
+.account-field input {
+  min-height: 2.75rem;
+  border: 1px solid var(--focus);
+  border-radius: .5rem;
+  padding: .35rem .75rem;
+  background: var(--surface);
+  color: var(--text);
+}
+.account-form button { justify-self: start; }
+.account-error { color: #b91c1c; }
+[data-theme="dark"] .account-error { color: #fca5a5; }
+.account-danger { background: #a21c24; }
+button:disabled { opacity: .7; cursor: wait; }
