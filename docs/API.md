@@ -57,3 +57,9 @@ Upload использует staging, потоковые лимиты без до
 /monitors, /monitors/{id}/checks, /connections, /oauth/{provider}/callback, /inbox/sources, /obligations, /reminders, /approvals, /ai/workflow-drafts, /billing, /webhooks/{provider}, /admin/analytics. Detailed contracts before respective stage. OAuth callback and webhook special auth, not ordinary session mutation. Health /health/live and /health/ready, /metrics private. No unrestricted debug endpoints. E2E contract tests and API version compatibility required.
 
 Начальная машиночитаемая спецификация здоровья API находится в [OpenAPI 3.1](openapi.yaml). Пути /health/live и /health/ready доступны на том же origin, что и frontend.
+
+## Аккаунты TASK-002
+
+Все аккаунтные маршруты описаны в [OpenAPI 3.1](openapi.yaml). `GET /auth/csrf?pre=1` выдаёт pre-auth контекст для публичных форм даже при наличии рабочей сессии. Мутации требуют точный `Origin` и заголовок `X-CSRF-Token`. Pre-auth контекст действует 15 минут, сессия семь суток. Пароль содержит не менее 12 символов и не более 256 байт UTF-8.
+
+`POST /me/export` принимает `Idempotency-Key`, `DELETE /me` принимает `confirm: true`. Операции принимают `current_password` для повторной проверки. Если пароль не передан, требуется сессия, подтверждённая в последние 10 минут. Выдача экспорта требует живой сессии владельца, а выданная ссылка привязана к этой сессии. Повтор DELETE с тем же токеном и CSRF подтверждает исходный запрос в пределах 24 часов. После принятия токен теряет доступ к остальным маршрутам.

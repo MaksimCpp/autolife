@@ -1,6 +1,6 @@
 # TASK-001 — Инициализация репозитория
 
-Статус: partial. Зависимости: 000.
+Статус: done. Зависимости: 000.
 
 ## Цель
 
@@ -56,11 +56,11 @@ AGENTS.md; docs/ROADMAP.md; docs/REQUIREMENTS.md; docs/TESTING.md. Дополн�
 
 ### TASK-001.06 — CI и проверки
 
-- [ ] Статус: partial.
+- [x] Статус: done.
 - Зависимости: TASK-001.05.
 - Реализация: Добавить GitHub Actions: gofmt/vet/test, frontend lint/typecheck/test/build, integration smoke, secret/dependency scan; закрепить версии. Фиксировать SHA actions и digest базовых образов.
 - Критерии приёмки: CI проверяет чистую сборку; ошибки не маскируются; команды воспроизводимы. CI использует тот же lockfile, runtime и базу, что интеграционный стенд.
-- Проверка: Go обновлён до 1.27.4, `golang.org/x/text` до 0.41.0. На закреплённых Linux-образах прошли Go format, `go mod verify`, vet, race, сборка, а также frontend frozen install, lint, typecheck, unit, build и npm audit. `govulncheck@v1.10.0` завершился с кодом 0 на macOS и в Linux и сообщил `No vulnerabilities found`. Linux-скан повторён отдельно с резервным Go proxy после сетевого EOF. Compose и CI используют закреплённые образы, frontend и River smoke используют проверяемые lockfile и суммы. `actionlint` прошёл. `gitleaks git --redact` прошёл на временном Git-снимке исходников. История проекта и запуск на GitHub Actions пока не подтверждены, в рабочей копии отсутствует `.git`.
+- Проверка: Go обновлён до 1.27.4, `golang.org/x/text` до 0.41.0. На закреплённых Linux-образах прошли Go format, `go mod verify`, vet, race, сборка, а также frontend frozen install, lint, typecheck, unit, build и npm audit. `govulncheck@v1.10.0` завершился с кодом 0 на macOS и в Linux и сообщил `No vulnerabilities found`. Linux-скан повторён отдельно с резервным Go proxy после сетевого EOF. Compose и CI используют закреплённые образы, frontend и River smoke используют проверяемые lockfile и суммы. `actionlint` прошёл. `gitleaks git --redact` прошёл на временном Git-снимке исходников. Gitleaks с `--log-opts=--all` проверил 1 коммит реальной истории, утечек нет. [GitHub Actions CI](https://github.com/MaksimCpp/autolife/actions/runs/45681491472) прошёл на `aa9667a857b7115df68ecc1e34cd2de1d0c1d03d`.
 
 ## Ожидаемый результат
 

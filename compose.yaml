@@ -9,6 +9,9 @@ x-backend: &backend
     AUTOLIFE_LOG_LEVEL: ${AUTOLIFE_LOG_LEVEL:-info}
     AUTOLIFE_MAX_BODY_BYTES: ${AUTOLIFE_MAX_BODY_BYTES:-105000000}
     AUTOLIFE_DB_MAX_CONNS: ${AUTOLIFE_DB_MAX_CONNS:-10}
+    AUTOLIFE_RESTORE_JOURNAL_DIR: /var/lib/autolife/restore
+  volumes:
+    - restore-journal:/var/lib/autolife/restore
   depends_on:
     migrate:
       condition: service_completed_successfully
@@ -60,6 +63,10 @@ services:
     environment:
       <<: *backend-env
       AUTOLIFE_API_DATABASE_URL: ${AUTOLIFE_API_DATABASE_URL:?required}
+      AUTOLIFE_PUBLIC_ORIGIN: ${AUTOLIFE_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+      AUTOLIFE_DEV_SMTP_ADDR: mail:1025
+      AUTOLIFE_TRUST_PROXY: "true"
+      AUTOLIFE_AUTH_SECRET: ${AUTOLIFE_AUTH_SECRET:?required}
 
   worker:
     <<: *backend
@@ -141,5 +148,6 @@ services:
 
 volumes:
   pg-data:
+  restore-journal:
   s3-data:
   mail-data:
