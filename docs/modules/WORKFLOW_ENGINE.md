@@ -1,0 +1,49 @@
+# Workflow Engine
+
+## Назначение и границы
+Независимое ядро запуска и координации сценариев. Не содержит логики PDF, сайтов, почты или AI. Action Registry и Trigger Registry предоставляют тип, версию, схемы config/input/output, права, ресурсный профиль и политику повторов. Регистрация статическая, без загрузки пользовательского кода. Новый обработчик добавляется без изменения основного алгоритма.
+
+## Модель
+Workflow (owner, name, status, draft, active version); WorkflowVersion (immutable definition, schema_version, revision); Step (id, action_type/version, config, input bindings, timeout, retry policy); Execution (owner, immutable version, trigger, status, input/output references, timestamps); StepExecution; Attempt; Artifact; ExecutionEvent. Draft mutable отдельно от опубликованных версий. Статусы workflow: draft/active/inactive/archived. Активная версия не меняется при редактировании.
+
+```json
+{"schema_version":1,"trigger":{"type":"core.manual","version":1,"config":{}},"steps":[{"id":"a","action_type":"file.image.convert","action_version":1,"config":{"format":"jpeg","quality":90},"input_bindings":{"files":{"source":"trigger","output":"files"}}},{"id":"b","action_type":"file.pdf.create","action_version":1,"config":{"page_size":"A4"},"input_bindings":{"images":{"source":"a","output":"files"}}}]}
+```
+В MVP порядок задаёт массив steps. Связи в UI выводятся из него, bindings ссылаются только на trigger, предшествующий шаг, константу или пользовательский параметр. Порты manual.files, convert.files и create.images объявлены в типизированных схемах реестра. Типы: string, integer, number, boolean, date, datetime, object, array, file reference, nullable по схеме. Бинарные данные не помещать в JSON/очередь. Источники: trigger, предыдущий шаг, константа, пользовательский параметр. Все ссылки проверяются на владельца и размер. Запрет eval и произвольных shell-команд.
+
+## Исполнение
+1. Авторизовать, выбрать версию, валидировать граф/конфигурацию/вход/доступ/квоты.
+2. Атомарно создать execution, зарезервировать ресурсы, закрепить входы и поставить durable job через River InsertTx вместе с записью Transactional Outbox и идемпотентности. Idempotency key ограничен владельцем и операцией.
+3. Воркер захватывает задачу, использует lease/fencing либо эквивалент, проверяет состояние. Выполняет готовый шаг с deadline и cancellation.
+4. Сохраняет проверенный output и состояние, публикует событие согласованно с транзакцией. Запускает следующий шаг.
+5. Фиксирует терминальный результат, освобождает квоты, очищает временные данные. Сбои аналитики не ломают выполнение.
+
+### Состояния и конкурентные переходы
+
+| Сущность | Переход | Условие |
+|---|---|---|
+| Execution | создание → queued | Общий commit с River InsertTx, pins, квотой и outbox. |
+| Execution | queued → running | CAS на допустимом состоянии и сроке, захват lease с новым fence. Первый захват фиксирует started_at и run_deadline. |
+| Execution | running → retrying → queued | Повторяемая ошибка, durable retry_at и попытки в пределах runtime deadline. Backoff включён в runtime. |
+| Execution | running → succeeded / failed | Совпадает fence и состояние, дедлайн не наступил. Success фиксирует полный проверенный набор выходов. |
+| Execution | queued/running/retrying → timed_out | Истёк start deadline до первого старта либо run deadline после него. Новые шаги и публикация блокируются проверкой дедлайна, watchdog подтверждает остановку обработчика до терминального commit. |
+| Execution | queued/running/retrying → cancel_requested → cancelled | Запрос фиксируется CAS. Новые шаги и публикация success запрещены. Терминальный commit после подтверждения остановки или сверки отсутствия активного обработчика. |
+| StepExecution | pending → running → succeeded / failed / timed_out / cancelled | Старт и запись выхода проверяют состояние execution и fence. Результаты успешных шагов сохраняются как checkpoints. |
+| StepExecution | running → retrying → running | Новая попытка только при безопасном повторе и оставшемся лимите. При остановке execution непройденные шаги становятся skipped. |
+| Attempt | running → succeeded / retryable_failed / permanent_failed / interrupted / timed_out / cancelled / unknown_outcome | Номер 1–3 на StepExecution. Записывается до вызова. Сбой после старта расходует попытку. Неопределённый внешний эффект требует сверки. |
+
+Терминальные состояния неизменяемы. На входе в cancel API после terminal state возвращается зафиксированный результат. Если отмена записалась первой, она имеет приоритет над последующей публикацией success/failed. При наступлении deadline до запроса отмены запрос возвращает состояние обработки таймаута и не меняет его семантику. Право фиксировать успех проверяется по времени PostgreSQL и CAS; при наступившем сроке обработчик останавливается, а watchdog определяет завершение. Перезапуск после истечения lease сверяет завершение старого обработчика, fencing и сохранённые шаги, затем возобновляет только незавершённое безопасное действие либо завершает ошибкой. Повторная доставка River не создаёт новый execution, не сбрасывает deadline и не начинает новую попытку до захвата. Пользовательский retry создаёт новый execution на той же исторической версии или снимке с новым ключом, актуальными входами и квотой. Архив блокирует и обычный запуск, и retry.
+
+Контракт постановки, staging, outbox и восстановления закреплён в [ADR-002](../adr/ADR-002-EXECUTION-RECOVERY.md).
+
+## Ошибки, retries, восстановление
+Коды: VALIDATION_ERROR, PERMISSION_DENIED, QUOTA_EXCEEDED, INVALID_INPUT, ACTION_TIMEOUT, INTEGRATION_UNAVAILABLE, PROCESSING_ERROR, UNKNOWN_OUTCOME. Не показывать stack trace или секреты. Временные ошибки: максимум 3 попытки на шаг вместе с первой, exponential backoff с jitter от 5 сек до 5 мин в рамках дедлайна. Постоянные не повторяются. Внешние эффекты требуют idempotency key провайдера или сверки; при UNKNOWN_OUTCOME запрет слепого retry. Exactly-once не обещается. Восстановление после crash — с durable checkpoint либо контролируемая ошибка с возможностью нового запуска. Не держать транзакцию на время обработки. Отмена прерывает обработчики и дочерние процессы, не отменяет уже совершённые внешние операции.
+
+## Будущие возможности
+P1: schedule, date и page_changed в 011, email_received и message_received в 012, file_uploaded в 011.09; декларативные условия AND/OR/NOT и сравнения; пропуск невыбранной ветви. Часовые пояса, DST, пропуски расписания и dedup event_id. По умолчанию не воспроизводить все пропущенные запуски, ограничивать перекрытие. P2: webhook, workflow_completed, bounded collections, DAG fan-out/join, лимит глубины цепочек и числа событий. Human approval хранится как durable ожидание, не удерживает воркер; состояние ожидания добавить согласованной миграцией. AI генерирует только валидируемые черновики из registry.
+
+## Ресурсы, события, метрики
+MVP: 20 шагов, 2 одновременных execution пользователя, 15 минут обработки; время ожидания очереди ограничить отдельно (30 минут от принятия). Резервирование атомарно, освобождение и сверка после crash. События workflow.created/updated/activated, execution.created/started/succeeded/failed/cancelled/timed_out, step.started/succeeded/failed/retry_scheduled/skipped, artifact.created, quota.exceeded. event_id, version, occurred_at, разрешённые идентификаторы и свойства по ANALYTICS. Dedup по event_id. Нет содержимого, секретов, приватных имён или URL в аналитике. Метрики: очередь, длительности, попытки, ошибки, обработанные файлы/байты; без высококардинальных labels.
+
+## Приёмка
+Тестовая цепочка из 3 действий передаёт типизированные данные, отклоняет цикл/несовместимость/неизвестную версию; новый handler регистрируется без изменения engine. Тесты отмены, таймаута, сбоя процесса, повторной доставки, гонок квот и доступов. Результаты и версии неизменяемы, повторный запуск корректен при истёкшем входе. Метрики и события не дублируют логический запуск. MVP исключает полноценный DAG scheduler, расписания, AI, внешние действия и ожидание подтверждения.

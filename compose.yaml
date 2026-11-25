@@ -1,0 +1,145 @@
+name: autolife
+
+x-backend: &backend
+  build:
+    context: ./backend
+    target: runtime
+  environment: &backend-env
+    AUTOLIFE_HTTP_ADDR: :8080
+    AUTOLIFE_LOG_LEVEL: ${AUTOLIFE_LOG_LEVEL:-info}
+    AUTOLIFE_MAX_BODY_BYTES: ${AUTOLIFE_MAX_BODY_BYTES:-105000000}
+    AUTOLIFE_DB_MAX_CONNS: ${AUTOLIFE_DB_MAX_CONNS:-10}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  stop_grace_period: 15s
+  healthcheck:
+    test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/health/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+
+services:
+  postgres:
+    image: postgres:17.9-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+    environment:
+      POSTGRES_DB: autolife
+      POSTGRES_PASSWORD: ${AUTOLIFE_DB_ADMIN_PASSWORD:?required}
+      AUTOLIFE_DB_API_PASSWORD: ${AUTOLIFE_DB_API_PASSWORD:?required}
+      AUTOLIFE_DB_WORKER_PASSWORD: ${AUTOLIFE_DB_WORKER_PASSWORD:?required}
+      AUTOLIFE_DB_MIGRATION_PASSWORD: ${AUTOLIFE_DB_MIGRATION_PASSWORD:?required}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./infrastructure/compose/init-postgres.sh:/docker-entrypoint-initdb.d/00-autolife.sh:ro
+    healthcheck:
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, postgres, -d, autolife]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: ./backend
+      target: migrations
+    command: ["/bin/sh", "-ec", '/app/migrate && /app/river migrate-up --schema queue && exec /app/migrate grant-river-access']
+    environment:
+      AUTOLIFE_MIGRATION_DATABASE_URL: ${AUTOLIFE_MIGRATION_DATABASE_URL:?required}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: autolife_migrate
+      PGPASSWORD: ${AUTOLIFE_DB_MIGRATION_PASSWORD:?required}
+      PGDATABASE: autolife
+      PGSSLMODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    command: ["/app/api"]
+    environment:
+      <<: *backend-env
+      AUTOLIFE_API_DATABASE_URL: ${AUTOLIFE_API_DATABASE_URL:?required}
+
+  worker:
+    <<: *backend
+    command: ["/app/worker"]
+    environment:
+      <<: *backend-env
+      AUTOLIFE_WORKER_DATABASE_URL: ${AUTOLIFE_WORKER_DATABASE_URL:?required}
+
+  frontend:
+    build: ./frontend
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:3000/en"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  proxy:
+    image: caddy:2.11.2@sha256:25cdc846626b62d05f6b633b9b40c2c9f6ef89b515dc76133cefd920f7dbe562
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./infrastructure/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  s3:
+    image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
+    command: [mini, "-dir=/data"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AUTOLIFE_S3_ACCESS_KEY:?required}
+      AWS_SECRET_ACCESS_KEY: ${AUTOLIFE_S3_SECRET_KEY:?required}
+      S3_BUCKET: autolife
+    ports:
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mail:
+    image: axllent/mailpit:v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
+    environment:
+      MP_DATABASE: /data/mailpit.db
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    volumes:
+      - mail-data:/data
+    healthcheck:
+      test: [CMD, /mailpit, readyz]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  river-smoke:
+    profiles: [test]
+    image: golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
+    working_dir: /smoke
+    command: ["/bin/sh", "-ec", "cp /tests/go.mod /tests/go.sum /tests/insert_test.go . && go test -mod=readonly -count=1 -v ./..."]
+    environment:
+      AUTOLIFE_API_DATABASE_URL: ${AUTOLIFE_API_DATABASE_URL:?required}
+      AUTOLIFE_WORKER_DATABASE_URL: ${AUTOLIFE_WORKER_DATABASE_URL:?required}
+    volumes:
+      - ./infrastructure/smoke/river:/tests:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pg-data:
+  s3-data:
+  mail-data:
