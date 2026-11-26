@@ -721,7 +721,120 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/files:
+    get:
+      operationId: listFiles
+      description: Requires a session. Lists unexpired ready files for the current owner.
+      parameters:
+      - in: query
+        name: limit
+        schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+      - in: query
+        name: cursor
+        schema: {type: string}
+      responses:
+        '200':
+          description: File page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files, next_cursor]
+                properties:
+                  files:
+                    type: array
+                    items: {$ref: '#/components/schemas/FileMetadata'}
+                  next_cursor: {type: string}
+        default: {$ref: '#/components/responses/FileError'}
+    post:
+      operationId: uploadFile
+      description: Requires a session, Origin and CSRF. One file, 1 to 100000000 bytes. JPEG, PNG, WebP and static PDF undergo mandatory isolated inspection.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              additionalProperties: false
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201':
+          description: File inspected and ready
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileMetadata'}
+        default: {$ref: '#/components/responses/FileError'}
+  /api/v1/files/{id}:
+    parameters:
+    - $ref: '#/components/parameters/FileID'
+    get:
+      operationId: getFile
+      description: Requires a session. Unavailable and foreign files return 404.
+      responses:
+        '200':
+          description: Owner file metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileMetadata'}
+        default: {$ref: '#/components/responses/FileError'}
+    delete:
+      operationId: deleteFile
+      description: Requires a session, Origin and CSRF. Active pins return 409. Object deletion is durable and asynchronous.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      responses:
+        '204':
+          description: File is inaccessible and scheduled for removal
+        default: {$ref: '#/components/responses/FileError'}
+  /api/v1/files/{id}/download:
+    parameters:
+    - $ref: '#/components/parameters/FileID'
+    post:
+      operationId: createFileDownload
+      description: Requires a session, Origin and CSRF. URL expires in at most five minutes and no later than the file.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      responses:
+        '200':
+          description: Private presigned attachment URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: {type: string, format: uri}
+        default: {$ref: '#/components/responses/FileError'}
 components:
+  parameters:
+    FileID:
+      in: path
+      name: id
+      required: true
+      schema: {type: string, format: uuid}
+    FileOrigin:
+      in: header
+      name: Origin
+      required: true
+      schema: {type: string}
+    FileCSRF:
+      in: header
+      name: X-CSRF-Token
+      required: true
+      schema: {type: string}
+  responses:
+    FileError:
+      description: Safe file error. Possible statuses include 401, 403, 404, 409, 413, 415, 422, 429 and 503.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
   securitySchemes:
     session:
       type: apiKey
@@ -729,6 +842,18 @@ components:
       name: __Host-autolife-session
       description: The loopback development cookie is named autolife-session.
   schemas:
+    FileMetadata:
+      type: object
+      required: [id, display_name, mime, bytes, state, created_at, ready_at, expires_at]
+      properties:
+        id: {type: string, format: uuid}
+        display_name: {type: string, maxLength: 255}
+        mime: {enum: [image/jpeg, image/png, image/webp, application/pdf]}
+        bytes: {type: integer, minimum: 1, maximum: 100000000}
+        state: {const: ready}
+        created_at: {type: string, format: date-time}
+        ready_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
     Health:
       type: object
       required: [status]
