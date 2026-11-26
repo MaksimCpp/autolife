@@ -137,3 +137,15 @@ func (h *HTTP) logout(w http.ResponseWriter, r *http.Request) {
 	h.cookie(w, "session", "", 0)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (h *HTTP) RequireSession(next http.Handler) http.Handler {
+	return h.require(next)
+}
+
+func (h *HTTP) ProtectSession(next http.Handler) http.Handler {
+	return h.protect("session")(next)
+}
+
+func SessionOwner(r *http.Request) string {
+	return currentSession(r).OwnerID
+}

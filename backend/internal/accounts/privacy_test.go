@@ -177,6 +177,18 @@ func TestPrivacyLifecycle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(journal.directory, deletion+".json")); err != nil {
 		t.Fatal(err)
 	}
+	var fileID string
+	if err := owner.QueryRow(ctx, "INSERT INTO platform.files (owner_id,display_name) VALUES ($1,'privacy-fixture.png') RETURNING id::text", user.ID).Scan(&fileID); err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Exec(ctx, "DELETE FROM platform.files WHERE id=$1", fileID)
+	advance(deletion, "running")
+	if _, err := owner.Exec(ctx, "DELETE FROM platform.files WHERE id=$1", fileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE platform.privacy_jobs SET next_attempt_at=now() WHERE id=$1", deletion); err != nil {
+		t.Fatal(err)
+	}
 	advance(deletion, "succeeded")
 	if again := field(request("DELETE", "/api/v1/me", token, deleteBody), "id", 202); again != deletion {
 		t.Fatal("deletion receipt changed")

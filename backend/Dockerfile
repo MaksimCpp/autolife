@@ -5,7 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /out/ ./cmd/...
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /out/ ./cmd/api ./cmd/worker ./cmd/migrate
 
 FROM toolchain AS river-build
 ARG GOPROXY=https://proxy.golang.org,direct

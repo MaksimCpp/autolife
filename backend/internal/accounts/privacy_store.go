@@ -129,7 +129,7 @@ func (s *Store) processPrivacy(ctx context.Context, journal Journal) (bool, erro
 	err := s.transaction(ctx, func(tx pgx.Tx) error {
 		var job privacyJob
 		err := tx.QueryRow(ctx, `SELECT id::text,owner_id::text,type,requested_at FROM platform.privacy_jobs
-			WHERE state='requested' AND next_attempt_at<=now() ORDER BY next_attempt_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`).
+			WHERE (state='requested' OR type='delete' AND state='running') AND next_attempt_at<=now() ORDER BY next_attempt_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`).
 			Scan(&job.ID, &job.Owner, &job.Type, &job.RequestedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -181,6 +181,14 @@ func processExport(ctx context.Context, tx pgx.Tx, job privacyJob) error {
 func processDelete(ctx context.Context, tx pgx.Tx, journal Journal, job privacyJob) error {
 	if err := journal.append(job.ID, job.Owner, job.RequestedAt); err != nil {
 		_, err := tx.Exec(ctx, "UPDATE platform.privacy_jobs SET next_attempt_at=now()+interval '10 seconds',safe_error='JOURNAL_UNAVAILABLE' WHERE id=$1", job.ID)
+		return err
+	}
+	var pendingFiles bool
+	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM platform.files WHERE owner_id=$1)", job.Owner).Scan(&pendingFiles); err != nil {
+		return err
+	}
+	if pendingFiles {
+		_, err := tx.Exec(ctx, "UPDATE platform.privacy_jobs SET state='running',next_attempt_at=now()+interval '10 seconds',safe_error=NULL WHERE id=$1", job.ID)
 		return err
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM platform.outbox_events WHERE payload->>'owner_id'=$1", job.Owner); err != nil {

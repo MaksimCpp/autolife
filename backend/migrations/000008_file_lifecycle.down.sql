@@ -1,0 +1,17 @@
+DROP TRIGGER check_file_pin ON platform.file_pins;
+DROP FUNCTION platform.check_file_pin();
+DROP INDEX platform.files_pending_cleanup;
+DROP POLICY reservations_owner ON platform.quota_reservations;
+DROP POLICY limits_owner ON platform.quota_limits;
+DROP POLICY pins_worker ON platform.file_pins;
+DROP POLICY pins_owner ON platform.file_pins;
+ALTER TABLE platform.quota_reservations DISABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.quota_limits DISABLE ROW LEVEL SECURITY;
+ALTER TABLE platform.file_pins DISABLE ROW LEVEL SECURITY;
+REVOKE SELECT, DELETE ON platform.file_pins FROM autolife_worker;
+REVOKE SELECT, INSERT, DELETE ON platform.quota_reservations FROM autolife_api;
+REVOKE SELECT ON platform.quota_limits, platform.file_pins FROM autolife_api;
+REVOKE SELECT, DELETE, UPDATE (state) ON platform.files FROM autolife_worker;
+REVOKE UPDATE (mime, bytes, sha256, state, ready_at, expires_at) ON platform.files FROM autolife_api;
+DROP POLICY files_worker ON platform.files;
+UPDATE platform.schema_stamp SET version=7 WHERE singleton;
