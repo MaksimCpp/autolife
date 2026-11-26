@@ -13,6 +13,9 @@ import (
 	"autolife/backend/internal/platform/config"
 	"autolife/backend/internal/platform/database"
 	"autolife/backend/internal/platform/httpserver"
+	"autolife/backend/internal/workflow"
+	workflowdb "autolife/backend/internal/workflow/postgres"
+	"autolife/backend/internal/workflow/workflowhttp"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,6 +56,11 @@ func Start(service, databaseKey string) int {
 		accountsHTTP.UseJournal(journal)
 		accountsHTTP.TrustProxy = os.Getenv("AUTOLIFE_TRUST_PROXY") == "true"
 		routes = append(routes, accountsHTTP.Routes)
+		registry := workflow.NewRegistry()
+		workflowAPI := workflowhttp.API{Store: workflowdb.New(pool, registry), Registry: registry}
+		routes = append(routes, func(r chi.Router) {
+			workflowAPI.Routes(r, accountsHTTP.RequireSession, accountsHTTP.ProtectSession, accounts.SessionOwner)
+		})
 		if files != nil {
 			routes = append(routes, func(r chi.Router) {
 				files.Routes(r, accountsHTTP.RequireSession, accountsHTTP.ProtectSession, accounts.SessionOwner)
