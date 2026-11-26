@@ -68,7 +68,7 @@ func TestPrivacyLifecycle(t *testing.T) {
 		return user, token
 	}
 	user, token := fixture()
-	_, other := fixture()
+	otherAccount, other := fixture()
 	const origin = "http://127.0.0.1:8080"
 	logger := slog.New(slog.DiscardHandler)
 	h, err := NewHTTP(api, logger, origin, "mail:1025", strings.Repeat("ab", 32))
@@ -120,6 +120,17 @@ func TestPrivacyLifecycle(t *testing.T) {
 		}
 		t.Fatalf("privacy job did not reach %s", want)
 	}
+	for _, item := range []struct{ accountID, name string }{
+		{user.ID, "owned-workflow-fixture"}, {otherAccount.ID, "other-workflow-fixture"},
+	} {
+		var id string
+		if err := owner.QueryRow(ctx, "INSERT INTO platform.workflows (owner_id,name) VALUES ($1,$2) RETURNING id::text", item.accountID, item.name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner.Exec(ctx, "INSERT INTO platform.workflow_drafts (owner_id,workflow_id,definition) VALUES ($1,$2,'{}')", item.accountID, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	id := field(request("POST", "/api/v1/me/export", token, "{}"), "id", 202)
 	if again := field(request("POST", "/api/v1/me/export", token, "{}"), "id", 202); again != id {
 		t.Fatal("export idempotency lost")
@@ -141,6 +152,9 @@ func TestPrivacyLifecycle(t *testing.T) {
 	data := request("GET", link, token, "")
 	if data.Code != 200 || !strings.Contains(data.Body.String(), user.Email) || strings.Contains(data.Body.String(), user.PasswordHash) || strings.Contains(data.Body.String(), "token_hash") {
 		t.Fatalf("unexpected export: %d", data.Code)
+	}
+	if !strings.Contains(data.Body.String(), "owned-workflow-fixture") || strings.Contains(data.Body.String(), "other-workflow-fixture") {
+		t.Fatal("workflow export did not preserve owner scope")
 	}
 	if w := request("GET", link, other, ""); w.Code != 404 {
 		t.Fatalf("foreign download: %d", w.Code)
@@ -196,6 +210,7 @@ func TestPrivacyLifecycle(t *testing.T) {
 	var remaining, audited int
 	if err := owner.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM platform.users WHERE id=$1)
+		+(SELECT count(*) FROM platform.workflows WHERE owner_id=$1)
 		+(SELECT count(*) FROM platform.user_settings WHERE user_id=$1)
 		+(SELECT count(*) FROM platform.sessions WHERE user_id=$1)
 		+(SELECT count(*) FROM platform.auth_tokens WHERE user_id=$1)

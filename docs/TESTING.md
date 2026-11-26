@@ -42,3 +42,9 @@ All P0 acceptance scenarios verified, backup restore tested, HTTPS, monitoring, 
 - На мигрировавшем тестовом PostgreSQL 17 запустить `go test -race -mod=readonly -count=1 -v ./internal/fileflow ./internal/accounts` из backend с DSN API, worker и migrate. Тестовый инспектор компилируется только в тесты. Для отдельной проверки SeaweedFS задать тестовый endpoint и credentials, затем запустить `TestS3PrivateObject`.
 - Собрать из корня `docker build -f backend/cmd/file-inspector/Dockerfile --target image -t autolife-task003-image backend` и соответствующую цель `pdf` с тегом `autolife-task003-pdf`. `python3 infrastructure/smoke/file-inspectors.py` (тестовая среда с Pillow) проверяет поведение парсеров в одноразовых контейнерах на синтетических файлах.
 - Проверки парсеров на Docker Desktop и адаптеров в Go отделены от допуска launcher. В TASK-010.02 и .09 требуются реальный Linux с AppArmor/cgroup v2, подтверждённые digest профилей, реальный `TestLinuxRuntime`, проверка production-подобного маршрута загрузки через launcher, полный прогон confinement/cleanup. Пропуск любого теста из этого набора блокирует публичный релиз.
+
+## TASK-004 — определения и реестр
+
+- `go test -race -mod=readonly -count=1 ./internal/workflow/...` проверяет цепочку со всеми типами привязок, схему и версии, циклы/ссылки вперёд, конфигурацию и форматы, проверку output и недоступные обработчики.
+- `TestWorkflowAPIAndPersistence` требует миграции 000009 и test DSN для API и migrate. Проверяются session/CSRF, матрица двух владельцев, черновики и копирование, атомарная конкурентная публикация, составные FK/RLS, неизменяемая версия/снимок, страницы, Outbox и архив. `TestPrivacyLifecycle` с DSN worker дополнительно проверяет экспорт и каскадное удаление определений.
+- Полевые проверки изоляции FileFlow остаются в TASK-010. Реальное выполнение цепочки через очередь проверяется в TASK-005 и последующих этапах FileFlow. В TASK-004 цепочка использует handlers из тестов.

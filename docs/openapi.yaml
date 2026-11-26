@@ -812,8 +812,272 @@ paths:
                 properties:
                   url: {type: string, format: uri}
         default: {$ref: '#/components/responses/FileError'}
+  /api/v1/actions:
+    get:
+      operationId: listWorkflowActions
+      description: Requires a session. Returns only available action versions.
+      responses:
+        '200':
+          description: Available actions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [actions]
+                properties:
+                  actions:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowDescriptor'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/triggers:
+    get:
+      operationId: listWorkflowTriggers
+      description: Requires a session.
+      responses:
+        '200':
+          description: Available triggers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [triggers]
+                properties:
+                  triggers:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowDescriptor'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows:
+    get:
+      operationId: listWorkflows
+      description: Requires a session. Lists only the current owner's workflows.
+      parameters:
+      - $ref: '#/components/parameters/WorkflowLimit'
+      - $ref: '#/components/parameters/WorkflowCursor'
+      - in: query
+        name: status
+        schema: {enum: [draft, active, inactive, archived]}
+      responses:
+        '200':
+          description: Workflow page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflows, next_cursor]
+                properties:
+                  workflows:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowMetadata'}
+                  next_cursor: {type: string}
+        default: {$ref: '#/components/responses/WorkflowError'}
+    post:
+      operationId: createWorkflow
+      description: Requires a session, Origin and CSRF. Creates an empty draft with revision 1.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+              - $ref: '#/components/schemas/WorkflowPatch'
+              - required: [name]
+      responses:
+        '201':
+          description: New workflow and draft
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowDetails'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    get:
+      operationId: getWorkflow
+      description: Requires a session.
+      responses:
+        '200':
+          description: Workflow and editable draft
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowDetails'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+    patch:
+      operationId: updateWorkflowMetadata
+      description: Requires a session, Origin and CSRF. Edits name and description.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkflowPatch'}
+      responses:
+        '200':
+          description: Updated workflow and draft
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowDetails'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+    delete:
+      operationId: archiveWorkflow
+      description: Requires a session, Origin and CSRF. Idempotently archives the workflow and retains versions.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      responses:
+        '204':
+          description: Workflow archived
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/copy:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: copyWorkflow
+      description: Requires a session, Origin and CSRF. Copies the draft into an independent workflow.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: {type: string, minLength: 1, maxLength: 120}
+      responses:
+        '201':
+          description: Independent workflow and draft
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowDetails'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/draft:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    put:
+      operationId: saveWorkflowDraft
+      description: Requires a session, Origin and CSRF. Saved draft definitions may be incomplete.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision, definition]
+              properties:
+                expected_revision: {type: integer, minimum: 1}
+                definition: {type: object, description: Bounded JSON draft up to 256 KiB}
+      responses:
+        '200':
+          description: Draft with incremented revision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowDraft'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/validate:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: validateWorkflow
+      description: Requires a session, Origin and CSRF. Checks an optional submitted definition or the saved draft without storing changes.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                definition: {type: object}
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, errors, warnings]
+                properties:
+                  valid: {type: boolean}
+                  errors:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowProblem'}
+                  warnings:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowProblem'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/versions:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    get:
+      operationId: listWorkflowVersions
+      description: Requires a session. Lists published version metadata in descending order.
+      parameters:
+      - $ref: '#/components/parameters/WorkflowLimit'
+      - $ref: '#/components/parameters/WorkflowCursor'
+      responses:
+        '200':
+          description: Version page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions, next_cursor]
+                properties:
+                  versions:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowVersion'}
+                  next_cursor: {type: string}
+        default: {$ref: '#/components/responses/WorkflowError'}
+    post:
+      operationId: publishWorkflowVersion
+      description: Requires a session, Origin and CSRF. An exact draft revision can be published once.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision]
+              properties:
+                expected_revision: {type: integer, minimum: 1}
+      responses:
+        '201':
+          description: Activated immutable version including its definition
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkflowVersion'}
+        default: {$ref: '#/components/responses/WorkflowError'}
 components:
   parameters:
+    WorkflowID:
+      in: path
+      name: id
+      required: true
+      schema: {type: string, format: uuid}
+    WorkflowLimit:
+      in: query
+      name: limit
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    WorkflowCursor:
+      in: query
+      name: cursor
+      schema: {type: string, maxLength: 512}
     FileID:
       in: path
       name: id
@@ -830,6 +1094,11 @@ components:
       required: true
       schema: {type: string}
   responses:
+    WorkflowError:
+      description: Safe error. Possible statuses include 400, 401, 403, 404, 409, 413, 422 and 503.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/WorkflowAPIError'}
     FileError:
       description: Safe file error. Possible statuses include 401, 403, 404, 409, 413, 415, 422, 429 and 503.
       content:
@@ -842,6 +1111,104 @@ components:
       name: __Host-autolife-session
       description: The loopback development cookie is named autolife-session.
   schemas:
+    WorkflowAPIError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, fields, request_id]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            fields:
+              type: array
+              items: {$ref: '#/components/schemas/WorkflowProblem'}
+            request_id: {type: string}
+    WorkflowPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 2000}
+    WorkflowMetadata:
+      type: object
+      required: [id, name, description, status, active_version_id, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string}
+        status: {enum: [draft, active, inactive, archived]}
+        active_version_id: {type: [string, 'null'], format: uuid}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    WorkflowDetails:
+      allOf:
+      - $ref: '#/components/schemas/WorkflowMetadata'
+      - type: object
+        required: [draft]
+        properties:
+          draft: {$ref: '#/components/schemas/WorkflowDraft'}
+    WorkflowDraft:
+      type: object
+      required: [revision, definition, updated_at]
+      properties:
+        revision: {type: integer, minimum: 1}
+        definition: {type: object}
+        updated_at: {type: string, format: date-time}
+    WorkflowVersion:
+      type: object
+      required: [id, version, revision, schema_version, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        version: {type: integer, minimum: 1}
+        revision: {type: integer, minimum: 1}
+        schema_version: {type: integer, minimum: 1}
+        definition: {type: object}
+        created_at: {type: string, format: date-time}
+    WorkflowDescriptor:
+      type: object
+      required: [type, version, config, inputs, outputs]
+      properties:
+        type: {type: string}
+        version: {type: integer, minimum: 1}
+        config: {$ref: '#/components/schemas/WorkflowFields'}
+        inputs: {$ref: '#/components/schemas/WorkflowFields'}
+        outputs: {$ref: '#/components/schemas/WorkflowFields'}
+        capability: {type: string}
+        resource_profile: {type: string}
+        max_attempts: {type: integer, minimum: 1, maximum: 3}
+        format_pairs:
+          type: array
+          items:
+            type: object
+            required: [input, output]
+            properties:
+              input: {type: string}
+              output: {type: string}
+    WorkflowFields:
+      type: object
+      additionalProperties: {$ref: '#/components/schemas/WorkflowField'}
+    WorkflowField:
+      type: object
+      required: [kind]
+      properties:
+        kind: {enum: [string, integer, number, boolean, date, datetime, object, array, file]}
+        optional: {type: boolean}
+        nullable: {type: boolean}
+        items: {$ref: '#/components/schemas/WorkflowField'}
+        properties: {$ref: '#/components/schemas/WorkflowFields'}
+        formats: {type: array, items: {type: string}}
+        enum: {type: array, items: {type: string}}
+        max_items: {type: integer, minimum: 1, maximum: 1000}
+    WorkflowProblem:
+      type: object
+      required: [code, path]
+      properties:
+        code: {type: string}
+        path: {type: string, description: JSON Pointer to the invalid field}
+        step_id: {type: string}
     FileMetadata:
       type: object
       required: [id, display_name, mime, bytes, state, created_at, ready_at, expires_at]

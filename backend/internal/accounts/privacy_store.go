@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	workflowdb "autolife/backend/internal/workflow/postgres"
 	"context"
 	"encoding/json"
 	"errors"
@@ -164,10 +165,15 @@ func processExport(ctx context.Context, tx pgx.Tx, job privacyJob) error {
 		FROM platform.sessions WHERE user_id=$1`, job.Owner).Scan(&sessions); err != nil {
 		return err
 	}
+	workflows, err := workflowdb.ExportDefinitions(ctx, tx, job.Owner)
+	if err != nil {
+		return err
+	}
 	export, err := json.Marshal(struct {
-		Profile  profile         `json:"profile"`
-		Sessions json.RawMessage `json:"sessions"`
-	}{p, sessions})
+		Profile   profile         `json:"profile"`
+		Sessions  json.RawMessage `json:"sessions"`
+		Workflows json.RawMessage `json:"workflows"`
+	}{p, sessions, workflows})
 	if err != nil {
 		return err
 	}
