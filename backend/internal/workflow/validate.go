@@ -341,3 +341,19 @@ func (r *Registry) Invoke(ctx context.Context, step Step, inputs Values, lookup 
 	}
 	return result, nil
 }
+
+// ValidateInputs checks the manual trigger and user parameters before a run is enqueued.
+func (r *Registry) ValidateInputs(ctx context.Context, d Definition, trigger, user Values, lookup FileLookup) ([]Problem, error) {
+	out, problems, err := r.triggerPorts(ctx, d.Trigger, lookup)
+	if err != nil || len(problems) > 0 {
+		return problems, err
+	}
+	problems, err = checkValues(ctx, lookup, out, trigger, "/trigger/outputs", "")
+	if err != nil {
+		return nil, err
+	}
+	other, err := checkValues(ctx, lookup, d.UserInputs, user, "/user_inputs", "")
+	problems = append(problems, other...)
+	sortProblems(problems)
+	return problems, err
+}

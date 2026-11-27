@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"autolife/backend/internal/accounts"
+	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow"
 	"autolife/backend/internal/platform/config"
 	"autolife/backend/internal/platform/database"
@@ -42,6 +43,21 @@ func Start(service, databaseKey string) int {
 		return 1
 	}
 	var routes []func(chi.Router)
+	ownerLimit, ownerErr := fileLimit("AUTOLIFE_EXECUTION_OWNER_LIMIT", execution.OwnerLimit, 128)
+	globalLimit, globalErr := fileLimit("AUTOLIFE_EXECUTION_GLOBAL_LIMIT", execution.GlobalLimit, 100_000)
+	storageLimit, storageErr := fileLimit("AUTOLIFE_FILE_STORAGE_BYTES", 1_000_000_000, 1<<50)
+	if ownerErr != nil || globalErr != nil || storageErr != nil {
+		logger.Error("invalid execution limits")
+		return 1
+	}
+	registry := workflow.NewRegistry()
+	executions, err := execution.New(pool, registry, service == "worker")
+	if err != nil {
+		logger.Error("cannot configure execution queue")
+		return 1
+	}
+
+	executions.Limits = execution.Limits{Owner: ownerLimit, Global: globalLimit, StorageBytes: storageLimit}
 	files, err := configureFiles(pool, service == "api")
 	if err != nil {
 		logger.Error("invalid file service configuration")
@@ -56,10 +72,10 @@ func Start(service, databaseKey string) int {
 		accountsHTTP.UseJournal(journal)
 		accountsHTTP.TrustProxy = os.Getenv("AUTOLIFE_TRUST_PROXY") == "true"
 		routes = append(routes, accountsHTTP.Routes)
-		registry := workflow.NewRegistry()
 		workflowAPI := workflowhttp.API{Store: workflowdb.New(pool, registry), Registry: registry}
 		routes = append(routes, func(r chi.Router) {
 			workflowAPI.Routes(r, accountsHTTP.RequireSession, accountsHTTP.ProtectSession, accounts.SessionOwner)
+			executions.Routes(r, accountsHTTP.RequireSession, accountsHTTP.ProtectSession, accounts.SessionOwner)
 		})
 		if files != nil {
 			routes = append(routes, func(r chi.Router) {
@@ -74,8 +90,20 @@ func Start(service, databaseKey string) int {
 		}
 	}
 	if service == "worker" {
+		routes = append(routes, func(r chi.Router) { r.Get("/metrics", executions.Metrics) })
+		if err := executions.Queue.Start(context.WithoutCancel(ctx)); err != nil {
+			logger.Error("cannot start execution queue")
+			return 1
+		}
+		defer func() {
+			if executions.Stop() != nil {
+				logger.Warn("execution queue shutdown timed out")
+			}
+		}()
 		workerContext, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
+		executionDone := make(chan struct{})
+		go func() { defer close(executionDone); executions.Maintain(workerContext, logger) }()
 		go func() {
 			defer close(done)
 			store.RunPrivacy(workerContext, journal, logger)
@@ -87,6 +115,7 @@ func Start(service, databaseKey string) int {
 		}
 		defer func() {
 			cancel()
+			<-executionDone
 			<-done
 			if fileDone != nil {
 				<-fileDone
