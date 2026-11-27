@@ -30,7 +30,7 @@ func ReportFileUsage(ctx context.Context, u FileUsage) error {
 	}
 	validFormat := func(f string) bool { return f == "" || fileUsageFormat.MatchString(f) }
 	if !validFormat(u.InputFormat) || !validFormat(u.OutputFormat) || u.InputCount < 0 || u.InputCount > 50 ||
-		u.OutputCount < 0 || u.OutputCount > 50 || u.InputBytes < 0 || u.InputBytes > 50*100_000_000 ||
+		u.OutputCount < 0 || u.OutputCount > 500 || u.InputBytes < 0 || u.InputBytes > 50*100_000_000 ||
 		u.OutputBytes < 0 || u.OutputBytes > MaxBytes || u.FailedIndex < 0 || u.FailedIndex > 50 {
 		return ErrInputs
 	}

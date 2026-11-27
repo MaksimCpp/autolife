@@ -37,8 +37,8 @@ var (
 )
 
 type Config struct {
-	DockerPath, DockerSocket, DockerConfigDir            string
-	Instance, ImageProfile, PDFProfile, TransformProfile string
+	DockerPath, DockerSocket, DockerConfigDir                                 string
+	Instance, ImageProfile, PDFProfile, TransformProfile, PDFTransformProfile string
 }
 
 type profile struct {
@@ -68,6 +68,10 @@ func New(config Config) (*Launcher, error) {
 	run := func(ctx context.Context, input io.Reader, limit int, args ...string) ([]byte, error) {
 		return docker(ctx, config, input, limit, args...)
 	}
+	if config.PDFTransformProfile != "" && (!imageReference.MatchString(config.PDFTransformProfile) ||
+		slices.Contains([]string{config.ImageProfile, config.PDFProfile, config.TransformProfile}, config.PDFTransformProfile)) {
+		return nil, errors.New("PDF transform requires a distinct digest-pinned image")
+	}
 	launcher := &Launcher{
 		instance: config.Instance,
 		run:      run,
@@ -77,8 +81,13 @@ func New(config Config) (*Launcher, error) {
 		},
 		slots: make(chan struct{}, 2),
 	}
+	if config.PDFTransformProfile != "" {
+		launcher.profiles["pdf-transform"] = profile{image: config.PDFTransformProfile, memory: "768m", timeout: 90 * time.Second}
+	}
 	if config.TransformProfile != "" {
 		launcher.profiles["image-transform"] = profile{image: config.TransformProfile, memory: "512m", timeout: 30 * time.Second}
+	}
+	if config.TransformProfile != "" || config.PDFTransformProfile != "" {
 		launcher.transforms = transformState{dir: filepath.Join(config.DockerConfigDir, "autolife-stopped-"+config.Instance), active: make(map[string]*transformJob), mu: new(sync.Mutex)}
 	}
 	return launcher, nil
@@ -194,6 +203,9 @@ func (l *Launcher) settings(p profile) (string, string) {
 	if transformed, ok := l.profiles["image-transform"]; ok && p.image == transformed.image {
 		return "/usr/local/bin/autolife-image", "rw,noexec,nosuid,nodev,size=384m,mode=1777"
 	}
+	if transformed, ok := l.profiles["pdf-transform"]; ok && p.image == transformed.image {
+		return "/usr/local/bin/autolife-pdf", "rw,noexec,nosuid,nodev,size=768m,mode=1777"
+	}
 	return "/usr/local/bin/autolife-inspect", "rw,noexec,nosuid,nodev,size=128m,mode=1777"
 }
 
@@ -268,7 +280,7 @@ func (l *Launcher) verifyContainer(ctx context.Context, name string, p profile, 
 }
 
 func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader, size int64) (output []byte, err error) {
-	if kind == "image-transform" || !l.Accepts(id, kind) || size < 1 || size > MaxInputBytes || input == nil {
+	if (kind != "image" && kind != "pdf") || !l.Accepts(id, kind) || size < 1 || size > MaxInputBytes || input == nil {
 		return nil, ErrRejected
 	}
 	data, err := l.execute(ctx, id, l.profiles[kind], input, size, MaxResultBytes)

@@ -56,3 +56,7 @@ All P0 acceptance scenarios verified, backup restore tested, HTTPS, monitoring, 
 ## TASK-006
 
 Собрать `docker build -t autolife-task006-image backend/cmd/image-transform`. `python3 infrastructure/smoke/image-transform.py` проверяет упаковку и качество на синтетических JPEG/PNG/WebP с Pillow. Для `TestImageWorkflows` нужны DSN ролей API/worker/migrate, отдельный SeaweedFS и `AUTOLIFE_IMAGE_TEST_TAG=autolife-task006-image` для реальной цепочки. Тестовый адаптер запускает тот же бинарник в ограниченных контейнерах, без использования ослабленного профиля в runtime приложения. Для общего прогона по одной тестовой БД используйте `go test -p 1 -race`: реестры fixture-пакетов различаются, каждому нужен свой прогон River. Проверка operator launcher с AppArmor/cgroup v2 остаётся в TASK-010.02/.09.
+
+## TASK-007
+
+Собрать `docker build -f backend/cmd/pdf-transform/Dockerfile -t autolife-task007-pdf backend`. `python3 infrastructure/smoke/pdf-transform.py` использует Pillow и pypdf для фикстур и проверки результата реального бинарника. `TestPDFWorkflowAPI` требует отдельные PostgreSQL и S3, а также `AUTOLIFE_PDF_TEST_TAG` и `AUTOLIFE_IMAGE_TEST_TAG`. Тест использует реальные маршруты, PostgreSQL/River, отдельное S3 и тестовый launcher для выполнения проверенных контейнеров. При общей тестовой очереди запускать интеграционные пакеты с `-p 1`. Операторский Unix launcher с AppArmor/cgroup v2 проверяется в TASK-010.

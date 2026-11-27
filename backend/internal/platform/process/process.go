@@ -12,6 +12,7 @@ import (
 	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow"
 	"autolife/backend/internal/fileflow/imageflow"
+	"autolife/backend/internal/fileflow/pdfflow"
 	"autolife/backend/internal/platform/config"
 	"autolife/backend/internal/platform/database"
 	"autolife/backend/internal/platform/httpserver"
@@ -83,6 +84,23 @@ func Start(service, databaseKey string) int {
 	}
 	if err != nil {
 		logger.Error("cannot register image actions")
+		return 1
+	}
+	var pdfLauncher *pdfflow.Launcher
+	if socket := os.Getenv("AUTOLIFE_PDF_LAUNCHER_SOCKET"); socket != "" {
+		pdfLauncher, err = pdfflow.NewLauncher(socket)
+		if err != nil {
+			logger.Error("invalid PDF launcher configuration")
+			return 1
+		}
+	}
+	if imageObjects == nil || pdfLauncher == nil {
+		err = pdfflow.Register(registry, nil, nil)
+	} else {
+		err = pdfflow.Register(registry, imageObjects, pdfLauncher)
+	}
+	if err != nil {
+		logger.Error("cannot register PDF actions")
 		return 1
 	}
 	if service == "api" {

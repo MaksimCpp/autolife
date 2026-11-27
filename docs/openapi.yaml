@@ -815,7 +815,7 @@ paths:
   /api/v1/actions:
     get:
       operationId: listWorkflowActions
-      description: Requires a session. Returns only available action versions. Image actions require an available, isolated launcher.
+      description: Requires a session. Returns only available action versions. Image and PDF actions require their available, isolated launcher profiles.
       responses:
         '200':
           description: Available actions

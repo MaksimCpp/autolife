@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"autolife/backend/internal/pdfproto"
 	"context"
 	"errors"
 	"io"
@@ -38,8 +39,11 @@ func (l *Launcher) prepareTransforms() error {
 	return nil
 }
 
-func (l *Launcher) TransformationReady(ctx context.Context) bool {
-	p, ok := l.profiles["image-transform"]
+func (l *Launcher) TransformationReady(ctx context.Context, kind string) bool {
+	if kind != "image-transform" && kind != "pdf-transform" {
+		return false
+	}
+	p, ok := l.profiles[kind]
 	if !ok || l.preflight(ctx) != nil {
 		return false
 	}
@@ -48,11 +52,24 @@ func (l *Launcher) TransformationReady(ctx context.Context) bool {
 }
 
 func (l *Launcher) Transform(ctx context.Context, id string, body io.Reader, size int64) ([]byte, error) {
-	p, ok := l.profiles["image-transform"]
+	return l.TransformProfile(ctx, id, "image-transform", body, size)
+}
+
+func (l *Launcher) TransformProfile(ctx context.Context, id, kind string, body io.Reader, size int64) ([]byte, error) {
+	var prefix, min, maxReq, maxRes int64
+	switch kind {
+	case "image-transform":
+		prefix, min, maxReq, maxRes = ImageHeaderBytes, ImageHeaderBytes+1, MaxInputBytes+ImageHeaderBytes, MaxInputBytes
+	case "pdf-transform":
+		prefix, min, maxReq, maxRes = 4, 5, pdfproto.MaxRequest, pdfproto.MaxResponse
+	default:
+		return nil, ErrRejected
+	}
+	p, ok := l.profiles[kind]
 	if !ok {
 		return nil, ErrUnavailable
 	}
-	if !jobID.MatchString(id) || size <= ImageHeaderBytes || size > MaxInputBytes+ImageHeaderBytes || body == nil {
+	if !jobID.MatchString(id) || size < min || size > maxReq || size <= prefix || body == nil {
 		return nil, ErrRejected
 	}
 	state := &l.transforms
@@ -76,11 +93,11 @@ func (l *Launcher) Transform(ctx context.Context, id string, body io.Reader, siz
 		close(job.done)
 		state.mu.Unlock()
 	}()
-	return l.execute(ctx, id, p, body, size, int(MaxInputBytes))
+	return l.execute(ctx, id, p, body, size, int(maxRes))
 }
 
 func (l *Launcher) ConfirmStopped(ctx context.Context, id string) error {
-	if !l.Accepts(id, "image-transform") {
+	if !l.Accepts(id, "image-transform") && !l.Accepts(id, "pdf-transform") {
 		return ErrUnavailable
 	}
 	state := &l.transforms

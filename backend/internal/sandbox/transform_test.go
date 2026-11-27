@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"autolife/backend/internal/pdfproto"
 )
 
 func TestAttemptRevocationSurvivesRestart(t *testing.T) {
@@ -116,5 +118,34 @@ func TestConfirmStopsActiveTransformBeforeProof(t *testing.T) {
 	}
 	if present {
 		t.Fatal("proof reported before container cleanup")
+	}
+}
+
+func TestPDFTransformProfileBounds(t *testing.T) {
+	cfg := Config{DockerPath: "/usr/bin/docker", DockerSocket: "/run/docker.sock", DockerConfigDir: t.TempDir(), Instance: "pdf-test",
+		ImageProfile: "sha256:" + strings.Repeat("1", 64), PDFProfile: "sha256:" + strings.Repeat("2", 64),
+		PDFTransformProfile: "sha256:" + strings.Repeat("3", 64)}
+	l, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.prepareTransforms(); err != nil {
+		t.Fatal(err)
+	}
+	args := l.createArgs("fixture", fixtureID, l.profiles["pdf-transform"])
+	if !slices.Contains(args, "/usr/local/bin/autolife-pdf") ||
+		!slices.Contains(args, "/work:rw,noexec,nosuid,nodev,size=768m,mode=1777") ||
+		!slices.Contains(args, "apparmor=docker-default") {
+		t.Fatalf("incorrect PDF profile: %v", args)
+	}
+	l.run = func(context.Context, io.Reader, int, ...string) ([]byte, error) {
+		t.Fatal("invalid request reached runtime")
+		return nil, nil
+	}
+	if _, err := l.TransformProfile(t.Context(), fixtureID, "pdf-transform", strings.NewReader("large"), pdfproto.MaxRequest+1); !errors.Is(err, ErrRejected) {
+		t.Fatal(err)
+	}
+	if _, err := l.Transform(t.Context(), fixtureID, strings.NewReader(strings.Repeat("x", 20)), 20); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
 	}
 }
