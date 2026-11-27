@@ -2,6 +2,8 @@ FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb910
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/file-inspector ./cmd/file-inspector
+COPY internal/pdfcheck ./internal/pdfcheck
+COPY internal/pdfproto ./internal/pdfproto
 COPY internal/sandbox/launcher.go internal/sandbox/transform.go ./internal/sandbox/
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /inspector ./cmd/file-inspector
 FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS image

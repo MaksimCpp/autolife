@@ -156,20 +156,31 @@ func checkpointArtifacts(ctx context.Context, tx pgx.Tx, e Execution, ordinal, n
 // ObjectKey resolves an owner-scoped input or prior staged checkpoint for the
 // current handler. The key is never returned by the public execution API.
 func ObjectKey(ctx context.Context, id string) (string, error) {
+	meta, err := ObjectMetadata(ctx, id)
+	return meta.Key, err
+}
+
+type Object struct {
+	Key   string
+	Bytes int64
+	MIME  string
+}
+
+func ObjectMetadata(ctx context.Context, id string) (Object, error) {
 	scope, ok := ctx.Value(attemptKey{}).(attemptScope)
 	if !ok {
-		return "", ErrLease
+		return Object{}, ErrLease
 	}
-	var key string
-	err := scope.store.Pool.QueryRow(ctx, `SELECT f.object_key FROM platform.files f
+	var result Object
+	err := scope.store.Pool.QueryRow(ctx, `SELECT f.object_key,f.bytes,f.mime FROM platform.files f
   JOIN platform.execution_file_refs r ON r.live_file_id=f.id AND r.owner_id=f.owner_id
   WHERE r.execution_id=$1 AND r.owner_id=$2 AND r.file_id=$3 AND (
    f.state='ready' OR EXISTS(SELECT 1 FROM platform.execution_staged_files st WHERE st.execution_id=$1 AND st.file_id=$3 AND checkpoint)) LIMIT 1`,
-		scope.execution.ID, scope.execution.OwnerID, id).Scan(&key)
+		scope.execution.ID, scope.execution.OwnerID, id).Scan(&result.Key, &result.Bytes, &result.MIME)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrInputs
+		return Object{}, ErrInputs
 	}
-	return key, err
+	return result, err
 }
 
 // AttemptID lets a registered handler correlate its private launcher job with

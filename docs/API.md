@@ -92,3 +92,7 @@ Upload использует staging, потоковые лимиты без до
 ## Действия изображений TASK-006
 
 `GET /actions` публикует `file.image.convert`, `file.image.compress`, `file.image.resize` версии 1 и их форматные пары при доступном профиле. Используйте workflow execution для одиночного файла и пакета. Отчёт размеров приходит в порте `sizes`. В подробностях исполнения попытка может содержать `failed_index`, позицию первого ошибочного входа с единицы. Итоговые ссылки становятся доступны после успешного завершения всех шагов.
+
+## PDF-действия TASK-007
+
+`GET /actions` публикует зарегистрированные версии `file.pdf.merge`, `file.pdf.split`, `file.pdf.extract` и `file.pdf.create` при доступном профиле. Операции запускаются через workflow execution. Параметры, порты и правила диапазонов указаны в [FileFlow](modules/FILE_FLOW.md). Выходы выдаются отдельными приватными attachment через `POST /files/{id}/download`.

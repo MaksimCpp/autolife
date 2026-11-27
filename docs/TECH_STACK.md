@@ -49,3 +49,7 @@
 ### Проверенная сборка TASK-006
 
 Профиль изображений собран на Alpine 3.23 с закреплённым digest базы и libvips `8.17.3-r1`. Компиляция из отдельного build-stage, динамическая линковка libvips. Поставляемая точка входа разрешает JPEG, PNG и WebP; HEIF-плагин не подключён. Инвентарь 85 runtime APK с версиями и заявленными лицензиями для проверенного linux/arm64-образа записан в [CycloneDX SBOM](sbom/image-transform-linux-arm64.cdx.json). У libvips LGPL-2.1-or-later; при распространении образа соблюдать условия динамической линковки, исходников и уведомлений для конкретной сборки. [Пакет Alpine](https://pkgs.alpinelinux.org/package/v3.23/community/aarch64/vips) · [лицензия libvips](https://github.com/libvips/libvips).
+
+### Проверенная сборка TASK-007
+
+PDF-профиль использует qpdf 12.2.0-r0 (Apache-2.0), img2pdf 0.6.3 (LGPL-3.0-or-later) с закреплённым SHA-256 wheel и встроенным движком, а также существующий libvips 8.17.3-r1 для нормализации JPEG/PNG/WebP. Runtime не требует pip и pikepdf. Лицензии и версии runtime-компонентов проверенной сборки перечислены в [CycloneDX SBOM](sbom/pdf-transform-linux-arm64.cdx.json). [qpdf](https://qpdf.readthedocs.io/en/12.2/qpdf-options.html) · [img2pdf](https://pypi.org/project/img2pdf/0.6.3/).

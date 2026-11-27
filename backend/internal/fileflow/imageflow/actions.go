@@ -3,24 +3,18 @@ package imageflow
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"autolife/backend/internal/execution"
+	"autolife/backend/internal/fileflow/processing"
 	"autolife/backend/internal/sandbox"
 	"autolife/backend/internal/workflow"
 )
 
-type storage interface {
-	Open(context.Context, string) (io.ReadCloser, int64, error)
-	Put(context.Context, string, io.ReadSeeker, int64, string, [sha256.Size]byte) error
-}
 type transformer interface {
 	Transform(context.Context, string, []byte, io.Reader, int64) (io.ReadCloser, int64, error)
 	ConfirmStopped(context.Context, string) (bool, error)
@@ -28,13 +22,13 @@ type transformer interface {
 }
 
 type Actions struct {
-	objects storage
+	objects processing.Storage
 	sandbox transformer
 }
 
 var formats = []string{"image/jpeg", "image/png", "image/webp"}
 
-func Register(registry *workflow.Registry, objects storage, launcher transformer) error {
+func Register(registry *workflow.Registry, objects processing.Storage, launcher transformer) error {
 	actions := Actions{objects, launcher}
 	for _, operation := range []string{"convert", "compress", "resize"} {
 		config := workflow.Fields{}
@@ -281,41 +275,10 @@ func (a Actions) one(ctx context.Context, attempt, id string, index int, header 
 	if _, err := io.ReadFull(result, prefix[:]); err != nil || detect(prefix[:]) != outputFormat {
 		return "", measured, execution.ErrInputs
 	}
-	tmp, err := os.CreateTemp("", "autolife-converted-*")
-	if err != nil {
-		return "", measured, execution.ErrTemporary
-	}
-	defer tmp.Close()
-	if err := os.Remove(tmp.Name()); err != nil {
-		return "", measured, execution.ErrTemporary
-	}
-	sha := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, sha), io.LimitReader(io.MultiReader(bytes.NewReader(prefix[:]), result), declared+1))
-	if err != nil {
-		return "", measured, execution.ErrTemporary
-	}
-	if declared != n {
-		return "", measured, execution.ErrInputs
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return "", measured, execution.ErrTemporary
-	}
-	var sum [sha256.Size]byte
-	copy(sum[:], sha.Sum(nil))
 	name := []string{"", "jpeg", "png", "webp"}[outputFormat]
-	mime := "image/" + name
-	output, err := execution.StageFile(ctx, execution.VerifiedFile{
-		Name: fmt.Sprintf("image-%02d.%s", index+1, name), MIME: mime, Bytes: n, SHA256: sum,
-	}, func(ctx context.Context, key string) error {
-		if err := a.objects.Put(ctx, key, tmp, n, mime, sum); err != nil {
-			return execution.ErrTemporary
-		}
-		return nil
-	})
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "", measured, err
-	}
-	measured.Output, measured.Reduced, measured.output = n, n < bytesIn, outputFormat
+	output, err := processing.Stage(ctx, a.objects, io.MultiReader(bytes.NewReader(prefix[:]), result), declared,
+		fmt.Sprintf("image-%02d.%s", index+1, name), "image/"+name)
+	measured.Output, measured.Reduced, measured.output = declared, declared < bytesIn, outputFormat
 	return output, measured, err
 }
 

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"autolife/backend/internal/pdfcheck"
 	"autolife/backend/internal/sandbox"
 )
 
@@ -59,7 +60,7 @@ func inspect(profile string, src io.Reader) (string, error) {
 	if count > sandbox.MaxInputBytes {
 		return "", nil
 	}
-	if profile == "image" && validImage(path) || profile == "pdf" && validPDF(path) {
+	if profile == "image" && validImage(path) || profile == "pdf" && pdfcheck.Pages(path) > 0 {
 		return mime, nil
 	}
 	return "", nil
@@ -89,64 +90,4 @@ func validImage(path string) bool {
 	}
 	// avg forces libvips to decode the entire raster sequentially.
 	return exec.Command("vips", "avg", path+"[access=sequential,fail-on=warning]").Run() == nil
-}
-
-func validPDF(path string) bool {
-	if exec.Command("qpdf", "--check", path).Run() != nil {
-		return false
-	}
-	out, err := exec.Command("qpdf", "--show-npages", path).Output()
-	if err != nil {
-		return false
-	}
-	pages, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pages < 1 || pages > 500 {
-		return false
-	}
-	cmd := exec.Command("qpdf", "--json", "--json-key=qpdf", "--json-key=encrypt", "--json-stream-data=none", path)
-	pipe, err := cmd.StdoutPipe()
-	if err != nil || cmd.Start() != nil {
-		return false
-	}
-	limited := &io.LimitedReader{R: pipe, N: 16 << 20}
-	var doc struct {
-		Encrypt struct{ Encrypted *bool }
-		QPDF    []json.RawMessage
-	}
-	dec := json.NewDecoder(limited)
-	err = dec.Decode(&doc)
-	var extra any
-	complete := err == nil && dec.Decode(&extra) == io.EOF && limited.N > 0
-	_ = pipe.Close()
-	if cmd.Wait() != nil || !complete || doc.Encrypt.Encrypted == nil || *doc.Encrypt.Encrypted || len(doc.QPDF) != 2 {
-		return false
-	}
-	tokens := json.NewDecoder(bytes.NewReader(doc.QPDF[1]))
-	depth := 0
-	for {
-		token, err := tokens.Token()
-		if err == io.EOF {
-			return depth == 0
-		}
-		if err != nil {
-			return false
-		}
-		switch x := token.(type) {
-		case json.Delim:
-			switch x {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-			if depth > 64 {
-				return false
-			}
-		case string:
-			switch x {
-			case "/AA", "/A", "/OpenAction", "/JavaScript", "/JS", "/Launch", "/AcroForm", "/XFA", "/EmbeddedFiles", "/EmbeddedFile", "/Filespec", "/RichMedia", "/Movie", "/Sound", "/3D", "/Annots", "/F", "/FFilter", "/FDecodeParms", "/Action", "/URI", "/GoToR", "/GoToE", "/SubmitForm", "/ImportData", "/Rendition", "/Collection", "/EF", "/AF":
-				return false
-			}
-		}
-	}
 }
