@@ -815,7 +815,7 @@ paths:
   /api/v1/actions:
     get:
       operationId: listWorkflowActions
-      description: Requires a session. Returns only available action versions.
+      description: Requires a session. Returns only available action versions. Image actions require an available, isolated launcher.
       responses:
         '200':
           description: Available actions
@@ -1327,6 +1327,7 @@ components:
                     required: [number, state, started_at]
                     properties:
                       number: {type: integer, minimum: 1, maximum: 3}
+                      failed_index: {type: integer, minimum: 1, maximum: 50, description: One-based failed input in an image batch}
                       state: {type: string}
                       started_at: {type: string, format: date-time}
                       ended_at: {type: [string, 'null'], format: date-time}

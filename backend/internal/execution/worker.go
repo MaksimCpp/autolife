@@ -366,6 +366,9 @@ func (s *Store) finishAttempt(conn transactionStarter, e Execution, ordinal, n i
      WHERE execution_id=$1 AND ordinal=$2 AND number=$3 AND fence=$4`, e.ID, ordinal, n, e.Fence); err != nil {
 				return err
 			}
+			if err := emitFileUsage(ctx, tx, e, &ordinal, "succeeded"); err != nil {
+				return err
+			}
 			success = true
 			return event(ctx, tx, e, "step.succeeded", key, "", 0)
 		}
@@ -545,6 +548,9 @@ func finishTx(ctx context.Context, tx pgx.Tx, e Execution, status State, code st
 		}
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM platform.execution_reservations WHERE execution_id=$1", e.ID); err != nil {
+		return err
+	}
+	if err := emitFileUsage(ctx, tx, e, nil, string(status)); err != nil {
 		return err
 	}
 	return event(ctx, tx, e, "execution."+string(status), e.ID, code, now.Sub(e.QueuedAt))

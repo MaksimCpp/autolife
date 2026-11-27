@@ -142,3 +142,18 @@ func (s *S3) orphanPage(ctx context.Context, cursor *string, cutoff time.Time, v
 	}
 	return page.NextContinuationToken, nil
 }
+
+// Open returns a private object to a server-side worker. Callers must first
+// resolve the key through the execution's owner-scoped file references.
+func (s *S3) Open(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, 0, err
+	}
+	size := aws.ToInt64(output.ContentLength)
+	if size < 1 || size > MaxFileBytes {
+		_ = output.Body.Close()
+		return nil, 0, ErrSize
+	}
+	return output.Body, size, nil
+}

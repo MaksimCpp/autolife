@@ -11,6 +11,7 @@ import (
 	"autolife/backend/internal/accounts"
 	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow"
+	"autolife/backend/internal/fileflow/imageflow"
 	"autolife/backend/internal/platform/config"
 	"autolife/backend/internal/platform/database"
 	"autolife/backend/internal/platform/httpserver"
@@ -61,6 +62,27 @@ func Start(service, databaseKey string) int {
 	files, err := configureFiles(pool, service == "api")
 	if err != nil {
 		logger.Error("invalid file service configuration")
+		return 1
+	}
+	var imageObjects *fileflow.S3
+	if files != nil {
+		imageObjects, _ = files.Objects.(*fileflow.S3)
+	}
+	var imageLauncher *imageflow.Launcher
+	if socket := os.Getenv("AUTOLIFE_IMAGE_LAUNCHER_SOCKET"); socket != "" {
+		imageLauncher, err = imageflow.NewLauncher(socket)
+		if err != nil {
+			logger.Error("invalid image launcher configuration")
+			return 1
+		}
+	}
+	if imageObjects == nil || imageLauncher == nil {
+		err = imageflow.Register(registry, nil, nil)
+	} else {
+		err = imageflow.Register(registry, imageObjects, imageLauncher)
+	}
+	if err != nil {
+		logger.Error("cannot register image actions")
 		return 1
 	}
 	if service == "api" {

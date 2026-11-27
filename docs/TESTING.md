@@ -52,3 +52,7 @@ All P0 acceptance scenarios verified, backup restore tested, HTTPS, monitoring, 
 ## TASK-005
 
 С чистой схемой PostgreSQL 17 и DSN трёх тестовых ролей применить миграции приложения. `go test -race -mod=readonly -count=1 -v ./internal/execution` применяет официальные миграции River на тестовой БД и проверяет атомарный rollback, исполнение цепочки, checkpoint, idempotency, retry, cancel, квоты, staging, истечение ссылок и Outbox. Фактический launcher для изолированных действий и проверка Linux/AppArmor/cgroup v2 остаются обязательными в TASK-010.02/.09. Тестовые handlers и подтверждение остановки определены только в тестах.
+
+## TASK-006
+
+Собрать `docker build -t autolife-task006-image backend/cmd/image-transform`. `python3 infrastructure/smoke/image-transform.py` проверяет упаковку и качество на синтетических JPEG/PNG/WebP с Pillow. Для `TestImageWorkflows` нужны DSN ролей API/worker/migrate, отдельный SeaweedFS и `AUTOLIFE_IMAGE_TEST_TAG=autolife-task006-image` для реальной цепочки. Тестовый адаптер запускает тот же бинарник в ограниченных контейнерах, без использования ослабленного профиля в runtime приложения. Для общего прогона по одной тестовой БД используйте `go test -p 1 -race`: реестры fixture-пакетов различаются, каждому нужен свой прогон River. Проверка operator launcher с AppArmor/cgroup v2 остаётся в TASK-010.02/.09.
