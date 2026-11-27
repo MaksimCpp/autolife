@@ -35,6 +35,7 @@ func testRegistry(t *testing.T) *Registry {
 			Descriptor: Descriptor{Key: Key{"fixture.convert", version}, Config: Fields{"format": {Kind: "string", Enum: []string{"png", "jpeg"}}},
 				Inputs: Fields{"files": fileArray("image/png", "image/jpeg")}, Outputs: Fields{"files": fileArray("image/png", "image/jpeg")},
 				MaxAttempts: 2, ResourceProfile: "image", FormatPairs: []FormatPair{{"image/png", "image/jpeg"}}},
+			ConfirmStopped: func(context.Context, string) (bool, error) { return true, nil },
 			Ports: func(config Values) (Fields, Fields) {
 				var format string
 				_ = json.Unmarshal(config["format"], &format)

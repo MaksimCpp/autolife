@@ -40,6 +40,8 @@ type Handler func(context.Context, Values, Values) (Values, error)
 type ActionDefinition struct {
 	Descriptor
 	Handler        Handler
+	SafeReplay     bool
+	ConfirmStopped func(context.Context, string) (bool, error)
 	Available      func() bool
 	ValidateConfig func(Values) []Problem
 	Ports          func(Values) (Fields, Fields)
@@ -62,7 +64,7 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) RegisterAction(a ActionDefinition) error {
-	if a.Handler == nil || a.MaxAttempts < 0 || a.MaxAttempts > 3 {
+	if a.Handler == nil || a.MaxAttempts < 0 || a.MaxAttempts > 3 || (a.ResourceProfile != "" && a.ConfirmStopped == nil) {
 		return errors.New("invalid action handler or policy")
 	}
 	desc, err := copyDescriptor(a.Descriptor)
@@ -226,4 +228,30 @@ func (a ActionDefinition) ports(cfg Values) (Fields, Fields, error) {
 		return nil, nil, fmt.Errorf("invalid dynamic port schema for %s", a.Type)
 	}
 	return in, out, nil
+}
+
+// ExecutionPolicy exposes server-controlled behavior for durable execution.
+func (r *Registry) ExecutionPolicy(step Step) (maxAttempts int, safeReplay bool, found bool) {
+	a, ok := r.action(Key{step.ActionType, step.ActionVersion})
+	if !ok {
+		return 1, false, false
+	}
+	n := max(a.MaxAttempts, 1)
+	if step.RetryPolicy != nil && step.RetryPolicy.MaxAttempts > 0 {
+		n = min(n, step.RetryPolicy.MaxAttempts)
+	}
+	return n, a.SafeReplay, true
+}
+
+// ConfirmStopped is required for isolated profiles. The supplied ID identifies
+// the same attempt passed to the handler; false leaves its resources reserved.
+func (r *Registry) ConfirmStopped(ctx context.Context, step Step, id string) (bool, error) {
+	a, ok := r.action(Key{step.ActionType, step.ActionVersion})
+	if !ok {
+		return false, nil
+	}
+	if a.ConfirmStopped == nil {
+		return a.ResourceProfile == "", nil
+	}
+	return a.ConfirmStopped(ctx, id)
 }

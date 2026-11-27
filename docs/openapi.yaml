@@ -1063,6 +1063,146 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/WorkflowVersion'}
         default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/executions:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: startExecution
+      description: Requires a session.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExecutionStart'}
+      responses:
+        '202':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionAccepted'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/workflows/{id}/test-executions:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: startTestExecution
+      description: Requires a session.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExecutionTest'}
+      responses:
+        '202':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionAccepted'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/executions/{id}/retry:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: retryExecution
+      description: Requires a session.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExecutionInputs'}
+      responses:
+        '202':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionAccepted'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/executions/{id}/cancel:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    post:
+      operationId: cancelExecution
+      description: Requires a session.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      responses:
+        '202':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionCancel'}
+        '200':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionCancel'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/executions/{id}:
+    parameters:
+    - $ref: '#/components/parameters/WorkflowID'
+    get:
+      operationId: getExecution
+      description: Requires a session.
+      responses:
+        '200':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionDetails'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/executions:
+    get:
+      operationId: listExecutions
+      description: Requires a session.
+      parameters:
+      - $ref: '#/components/parameters/WorkflowLimit'
+      - $ref: '#/components/parameters/WorkflowCursor'
+      - name: workflow_id
+        in: query
+        schema: {type: string, format: uuid}
+      - name: status
+        in: query
+        schema: {$ref: '#/components/schemas/ExecutionState'}
+      responses:
+        '200':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionPage'}
+        default: {$ref: '#/components/responses/WorkflowError'}
+  /api/v1/usage:
+    get:
+      operationId: getExecutionUsage
+      description: Requires a session.
+      responses:
+        '200':
+          description: Execution request processed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionUsage'}
+        default: {$ref: '#/components/responses/WorkflowError'}
 components:
   parameters:
     WorkflowID:
@@ -1111,6 +1251,112 @@ components:
       name: __Host-autolife-session
       description: The loopback development cookie is named autolife-session.
   schemas:
+    ExecutionState:
+      enum: [queued, running, retrying, cancel_requested, succeeded, failed, cancelled, timed_out]
+    ExecutionInputs:
+      type: object
+      properties:
+        files:
+          type: array
+          maxItems: 50
+          items: {type: string, format: uuid}
+        user_inputs: {type: object}
+    ExecutionStart:
+      allOf:
+      - $ref: '#/components/schemas/ExecutionInputs'
+      - type: object
+        properties:
+          version_id: {type: string, format: uuid}
+    ExecutionTest:
+      allOf:
+      - $ref: '#/components/schemas/ExecutionInputs'
+      - type: object
+        required: [expected_revision]
+        properties:
+          expected_revision: {type: integer, minimum: 1}
+    ExecutionAccepted:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string, format: uuid}
+    ExecutionCancel:
+      allOf:
+      - $ref: '#/components/schemas/ExecutionAccepted'
+      - type: object
+        required: [status]
+        properties:
+          status: {$ref: '#/components/schemas/ExecutionState'}
+    Execution:
+      type: object
+      required: [id, workflow_id, status, queued_at, start_deadline]
+      properties:
+        id: {type: string, format: uuid}
+        workflow_id: {type: string, format: uuid}
+        version_id: {type: [string, 'null'], format: uuid}
+        snapshot_id: {type: [string, 'null'], format: uuid}
+        status: {$ref: '#/components/schemas/ExecutionState'}
+        queued_at: {type: string, format: date-time}
+        start_deadline: {type: string, format: date-time}
+        started_at: {type: [string, 'null'], format: date-time}
+        run_deadline: {type: [string, 'null'], format: date-time}
+        terminal_at: {type: [string, 'null'], format: date-time}
+        error_code: {type: [string, 'null']}
+        outputs: {type: object}
+    ExecutionDetails:
+      allOf:
+      - $ref: '#/components/schemas/Execution'
+      - type: object
+        required: [steps, files]
+        properties:
+          steps:
+            type: array
+            items:
+              type: object
+              required: [ordinal, step_id, action_type, action_version, status, attempts]
+              properties:
+                ordinal: {type: integer}
+                step_id: {type: string}
+                action_type: {type: string}
+                action_version: {type: integer}
+                status: {type: string}
+                error_code: {type: [string, 'null']}
+                attempts:
+                  type: array
+                  items:
+                    type: object
+                    required: [number, state, started_at]
+                    properties:
+                      number: {type: integer, minimum: 1, maximum: 3}
+                      state: {type: string}
+                      started_at: {type: string, format: date-time}
+                      ended_at: {type: [string, 'null'], format: date-time}
+                      error_code: {type: [string, 'null']}
+          files:
+            type: array
+            items:
+              type: object
+              required: [id, role, expired]
+              properties:
+                id: {type: string, format: uuid}
+                role: {enum: [input, output]}
+                expired: {type: boolean}
+    ExecutionPage:
+      type: object
+      required: [executions, next_cursor]
+      properties:
+        executions:
+          type: array
+          items: {$ref: '#/components/schemas/Execution'}
+        next_cursor: {type: string}
+    ExecutionUsage:
+      type: object
+      required: [active_executions, active_execution_limit, reserved_input_bytes, stored_file_bytes, reserved_upload_bytes]
+      properties:
+        active_executions: {type: integer}
+        active_execution_limit: {type: integer}
+        reserved_input_bytes: {type: integer}
+        stored_file_bytes: {type: integer}
+        reserved_upload_bytes: {type: integer}
     WorkflowAPIError:
       type: object
       required: [error]

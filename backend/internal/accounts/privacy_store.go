@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"autolife/backend/internal/execution"
 	workflowdb "autolife/backend/internal/workflow/postgres"
 	"context"
 	"encoding/json"
@@ -169,11 +170,16 @@ func processExport(ctx context.Context, tx pgx.Tx, job privacyJob) error {
 	if err != nil {
 		return err
 	}
+	executions, err := execution.ExportHistory(ctx, tx, job.Owner)
+	if err != nil {
+		return err
+	}
 	export, err := json.Marshal(struct {
-		Profile   profile         `json:"profile"`
-		Sessions  json.RawMessage `json:"sessions"`
-		Workflows json.RawMessage `json:"workflows"`
-	}{p, sessions, workflows})
+		Profile    profile         `json:"profile"`
+		Sessions   json.RawMessage `json:"sessions"`
+		Workflows  json.RawMessage `json:"workflows"`
+		Executions json.RawMessage `json:"executions"`
+	}{p, sessions, workflows, executions})
 	if err != nil {
 		return err
 	}
@@ -190,7 +196,7 @@ func processDelete(ctx context.Context, tx pgx.Tx, journal Journal, job privacyJ
 		return err
 	}
 	var pendingFiles bool
-	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM platform.files WHERE owner_id=$1)", job.Owner).Scan(&pendingFiles); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM platform.files WHERE owner_id=$1) OR EXISTS(SELECT 1 FROM platform.executions WHERE owner_id=$1 AND terminal_at IS NULL)", job.Owner).Scan(&pendingFiles); err != nil {
 		return err
 	}
 	if pendingFiles {

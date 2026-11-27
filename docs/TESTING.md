@@ -48,3 +48,7 @@ All P0 acceptance scenarios verified, backup restore tested, HTTPS, monitoring, 
 - `go test -race -mod=readonly -count=1 ./internal/workflow/...` проверяет цепочку со всеми типами привязок, схему и версии, циклы/ссылки вперёд, конфигурацию и форматы, проверку output и недоступные обработчики.
 - `TestWorkflowAPIAndPersistence` требует миграции 000009 и test DSN для API и migrate. Проверяются session/CSRF, матрица двух владельцев, черновики и копирование, атомарная конкурентная публикация, составные FK/RLS, неизменяемая версия/снимок, страницы, Outbox и архив. `TestPrivacyLifecycle` с DSN worker дополнительно проверяет экспорт и каскадное удаление определений.
 - Полевые проверки изоляции FileFlow остаются в TASK-010. Реальное выполнение цепочки через очередь проверяется в TASK-005 и последующих этапах FileFlow. В TASK-004 цепочка использует handlers из тестов.
+
+## TASK-005
+
+С чистой схемой PostgreSQL 17 и DSN трёх тестовых ролей применить миграции приложения. `go test -race -mod=readonly -count=1 -v ./internal/execution` применяет официальные миграции River на тестовой БД и проверяет атомарный rollback, исполнение цепочки, checkpoint, idempotency, retry, cancel, квоты, staging, истечение ссылок и Outbox. Фактический launcher для изолированных действий и проверка Linux/AppArmor/cgroup v2 остаются обязательными в TASK-010.02/.09. Тестовые handlers и подтверждение остановки определены только в тестах.

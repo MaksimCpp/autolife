@@ -261,7 +261,8 @@ func (s *Service) cleanupOne(ctx context.Context) (bool, error) {
    LEFT JOIN platform.privacy_jobs j ON j.owner_id=f.owner_id AND j.type='delete' AND j.state='running'
    WHERE (f.state='deleting' OR f.state='ready' AND (f.expires_at<=now() OR j.id IS NOT NULL)
    OR f.state='uploading' AND (f.created_at<=now()-interval '5 minutes' OR j.id IS NOT NULL))
-   AND NOT EXISTS (SELECT 1 FROM platform.file_pins p WHERE p.file_id=f.id AND p.owner_id=f.owner_id AND p.expires_at>clock_timestamp())
+   AND NOT EXISTS (SELECT 1 FROM platform.execution_staged_files st WHERE st.file_id=f.id)
+			AND NOT EXISTS (SELECT 1 FROM platform.file_pins p WHERE p.file_id=f.id AND p.owner_id=f.owner_id AND p.expires_at>clock_timestamp())
    ORDER BY f.created_at,f.id FOR UPDATE OF f SKIP LOCKED LIMIT 1`).Scan(&id, &key)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
