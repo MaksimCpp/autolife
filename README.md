@@ -51,3 +51,5 @@ Go format, vet, unit/race, проверки хешей модулей, сбор�
 ## Файловое API
 
 Метаданные файлов доступны авторизованному владельцу через `/api/v1/files`. Для загрузки оператор Linux отдельно запускает `sandbox-launcher` с двумя проверенными digest профилей и передаёт API путь к его сокету через `AUTOLIFE_FILE_INSPECTOR_SOCKET`. Сокет должен быть доступен API на чтение/запись по правам Unix; Docker socket остаётся вне API и worker. Локальный Compose по умолчанию не подключает launcher, поэтому загрузка отвечает 503 до настройки совместимого runtime. Тесты и обязательный релизный допуск описаны в [TESTING](docs/TESTING.md).
+
+Для действий изображений соберите `docker build -t autolife-task006-image backend/cmd/image-transform`. На совместимом Linux оператор задаёт launcher опцию `-image-transform` с проверенным digest и монтирует только сокет launcher в API и worker, передавая его путь через `AUTOLIFE_IMAGE_LAUNCHER_SOCKET`. Каталог скрывает действия, пока профиль или приватное хранилище недоступны. Тесты форматов описаны в [TESTING](docs/TESTING.md).

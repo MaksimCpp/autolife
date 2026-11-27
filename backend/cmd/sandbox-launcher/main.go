@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ func main() {
 	flag.StringVar(&config.Instance, "instance", "", "unique installation identifier")
 	flag.StringVar(&config.ImageProfile, "image", "", "digest-pinned image inspection image")
 	flag.StringVar(&config.PDFProfile, "pdf", "", "digest-pinned PDF inspection image")
+	flag.StringVar(&config.TransformProfile, "image-transform", "", "digest-pinned image transform profile")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -75,6 +77,59 @@ func serve(ctx context.Context, config sandbox.Config, socket string) error {
 	}
 
 	routes := http.NewServeMux()
+	transformResponseSlots := make(chan struct{}, 2)
+	routes.HandleFunc("GET /v1/image-transform/ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if !launcher.TransformationReady(ctx) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	routes.HandleFunc("DELETE /v1/image-transform/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		if launcher.ConfirmStopped(ctx, r.PathValue("id")) != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	routes.HandleFunc("POST /v1/image-transform/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/octet-stream" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case transformResponseSlots <- struct{}{}:
+			defer func() { <-transformResponseSlots }()
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		stamp, err := strconv.ParseInt(r.Header.Get("X-AutoLife-Deadline"), 10, 64)
+		deadline := time.UnixMilli(stamp)
+		now := time.Now()
+		if err != nil || !deadline.After(now) || deadline.After(now.Add(15*time.Minute)) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithDeadline(r.Context(), deadline)
+		defer cancel()
+		data, err := launcher.Transform(ctx, r.PathValue("id"), r.Body, r.ContentLength)
+		switch {
+		case errors.Is(err, sandbox.ErrRejected):
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		case err != nil:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			_, _ = w.Write(data)
+		}
+	})
 	routes.HandleFunc("POST /v1/jobs/{id}/{profile}", func(w http.ResponseWriter, r *http.Request) {
 		id, profile := r.PathValue("id"), r.PathValue("profile")
 		if !launcher.Accepts(id, profile) || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/octet-stream" {

@@ -22,7 +22,7 @@ func Ready(ctx context.Context, pool *pgxpool.Pool) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var ready bool
-	if err := pool.QueryRow(ctx, "SELECT version = 10 FROM platform.schema_stamp WHERE singleton").Scan(&ready); err != nil || !ready {
+	if err := pool.QueryRow(ctx, "SELECT version = 11 FROM platform.schema_stamp WHERE singleton").Scan(&ready); err != nil || !ready {
 		return errors.New("PostgreSQL or the application schema is unavailable")
 	}
 	return nil

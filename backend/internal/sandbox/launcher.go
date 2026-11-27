@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,8 +37,8 @@ var (
 )
 
 type Config struct {
-	DockerPath, DockerSocket, DockerConfigDir string
-	Instance, ImageProfile, PDFProfile        string
+	DockerPath, DockerSocket, DockerConfigDir            string
+	Instance, ImageProfile, PDFProfile, TransformProfile string
 }
 
 type profile struct {
@@ -50,23 +50,25 @@ type profile struct {
 type command func(context.Context, io.Reader, int, ...string) ([]byte, error)
 
 type Launcher struct {
-	instance string
-	profiles map[string]profile
-	run      command
-	slots    chan struct{}
+	instance   string
+	profiles   map[string]profile
+	run        command
+	slots      chan struct{}
+	transforms transformState
 }
 
 func New(config Config) (*Launcher, error) {
 	if !filepath.IsAbs(config.DockerPath) || !filepath.IsAbs(config.DockerSocket) || !filepath.IsAbs(config.DockerConfigDir) ||
 		!instanceName.MatchString(config.Instance) ||
 		!imageReference.MatchString(config.ImageProfile) || !imageReference.MatchString(config.PDFProfile) ||
-		config.ImageProfile == config.PDFProfile {
+		config.ImageProfile == config.PDFProfile ||
+		(config.TransformProfile != "" && (!imageReference.MatchString(config.TransformProfile) || config.TransformProfile == config.ImageProfile || config.TransformProfile == config.PDFProfile)) {
 		return nil, errors.New("launcher configuration requires local absolute paths and two distinct digest-pinned images")
 	}
 	run := func(ctx context.Context, input io.Reader, limit int, args ...string) ([]byte, error) {
 		return docker(ctx, config, input, limit, args...)
 	}
-	return &Launcher{
+	launcher := &Launcher{
 		instance: config.Instance,
 		run:      run,
 		profiles: map[string]profile{
@@ -74,7 +76,12 @@ func New(config Config) (*Launcher, error) {
 			"pdf":   {image: config.PDFProfile, memory: "384m", timeout: 25 * time.Second},
 		},
 		slots: make(chan struct{}, 2),
-	}, nil
+	}
+	if config.TransformProfile != "" {
+		launcher.profiles["image-transform"] = profile{image: config.TransformProfile, memory: "512m", timeout: 30 * time.Second}
+		launcher.transforms = transformState{dir: filepath.Join(config.DockerConfigDir, "autolife-stopped-"+config.Instance), active: make(map[string]*transformJob), mu: new(sync.Mutex)}
+	}
+	return launcher, nil
 }
 
 type boundedOutput struct {
@@ -172,6 +179,9 @@ func (l *Launcher) Prepare(ctx context.Context) error {
 	if err := l.purge(ctx); err != nil {
 		return err
 	}
+	if err := l.prepareTransforms(); err != nil {
+		return err
+	}
 	return l.preflight(ctx)
 }
 
@@ -180,7 +190,15 @@ func (l *Launcher) Accepts(id, kind string) bool {
 	return ok && jobID.MatchString(id)
 }
 
+func (l *Launcher) settings(p profile) (string, string) {
+	if transformed, ok := l.profiles["image-transform"]; ok && p.image == transformed.image {
+		return "/usr/local/bin/autolife-image", "rw,noexec,nosuid,nodev,size=384m,mode=1777"
+	}
+	return "/usr/local/bin/autolife-inspect", "rw,noexec,nosuid,nodev,size=128m,mode=1777"
+}
+
 func (l *Launcher) createArgs(name, id string, p profile) []string {
+	entry, workspace := l.settings(p)
 	return []string{
 		"create", "--name", name, "--label", l.label(), "--label", "io.autolife.job=" + id,
 		"--pull", "never", "--interactive", "--read-only", "--network", "none", "--ipc", "none",
@@ -188,9 +206,9 @@ func (l *Launcher) createArgs(name, id string, p profile) []string {
 		"--security-opt", "apparmor=docker-default", "--cgroupns", "private",
 		"--cpus", "1", "--memory", p.memory, "--memory-swap", p.memory, "--pids-limit", "32",
 		"--log-driver", "none", "--restart", "no", "--ulimit", "nofile=128:128",
-		"--tmpfs", "/work:rw,noexec,nosuid,nodev,size=128m,mode=1777",
+		"--tmpfs", "/work:" + workspace,
 		"--workdir", "/work", "--env", "TMPDIR=/work",
-		"--entrypoint", "/usr/local/bin/autolife-inspect", p.image,
+		"--entrypoint", entry, p.image,
 	}
 }
 
@@ -227,6 +245,7 @@ func (l *Launcher) verifyContainer(ctx context.Context, name string, p profile, 
 		return ErrUnavailable
 	}
 	host := state.HostConfig
+	_, workspace := l.settings(p)
 	megabytes, parseErr := strconv.ParseInt(strings.TrimSuffix(p.memory, "m"), 10, 64)
 	noNewPrivileges := slices.Contains(host.SecurityOpt, "no-new-privileges:true") ||
 		slices.Contains(host.SecurityOpt, "no-new-privileges=true")
@@ -237,7 +256,7 @@ func (l *Launcher) verifyContainer(ctx context.Context, name string, p profile, 
 		host.Memory != megabytes<<20 || host.MemorySwap != host.Memory || host.PidsLimit != 32 ||
 		len(host.CapAdd) != 0 || !slices.Equal(host.CapDrop, []string{"ALL"}) ||
 		len(host.SecurityOpt) != 2 || !noNewPrivileges || !appArmor ||
-		len(host.Tmpfs) != 1 || host.Tmpfs["/work"] != "rw,noexec,nosuid,nodev,size=128m,mode=1777" {
+		len(host.Tmpfs) != 1 || host.Tmpfs["/work"] != workspace {
 		return ErrUnavailable
 	}
 	for _, mount := range state.Mounts {
@@ -249,9 +268,20 @@ func (l *Launcher) verifyContainer(ctx context.Context, name string, p profile, 
 }
 
 func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader, size int64) (output []byte, err error) {
-	if !l.Accepts(id, kind) || size < 1 || size > MaxInputBytes || input == nil {
+	if kind == "image-transform" || !l.Accepts(id, kind) || size < 1 || size > MaxInputBytes || input == nil {
 		return nil, ErrRejected
 	}
+	data, err := l.execute(ctx, id, l.profiles[kind], input, size, MaxResultBytes)
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(data) {
+		return nil, ErrUnavailable
+	}
+	return data, nil
+}
+
+func (l *Launcher) execute(ctx context.Context, id string, p profile, input io.Reader, size int64, outputLimit int) (output []byte, err error) {
 	select {
 	case l.slots <- struct{}{}:
 		defer func() { <-l.slots }()
@@ -260,7 +290,6 @@ func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader
 	default:
 		return nil, ErrSaturated
 	}
-	p := l.profiles[kind]
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := l.preflight(ctx); err != nil {
@@ -294,7 +323,7 @@ func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader
 		stopRead := context.AfterFunc(ctx, func() { _ = closer.Close() })
 		defer stopRead()
 	}
-	data, err := l.run(ctx, limited, MaxResultBytes, "start", "--attach", "--interactive", name)
+	data, err := l.run(ctx, limited, outputLimit, "start", "--attach", "--interactive", name)
 	if ctx.Err() != nil {
 		return nil, ErrUnavailable
 	}
@@ -315,9 +344,6 @@ func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader
 	}
 	if l.verifyContainer(ctx, name, p, true) != nil {
 		return nil, ErrUnavailable
-	}
-	if !json.Valid(data) {
-		return nil, fmt.Errorf("%w: invalid inspector response", ErrUnavailable)
 	}
 	return data, nil
 }

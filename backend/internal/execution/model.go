@@ -82,11 +82,12 @@ type StepExecution struct {
 	Attempts  []Attempt `json:"attempts"`
 }
 type Attempt struct {
-	Number    int        `json:"number"`
-	State     string     `json:"state"`
-	StartedAt time.Time  `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at"`
-	ErrorCode *string    `json:"error_code"`
+	FailedIndex *int       `json:"failed_index,omitempty"`
+	Number      int        `json:"number"`
+	State       string     `json:"state"`
+	StartedAt   time.Time  `json:"started_at"`
+	EndedAt     *time.Time `json:"ended_at"`
+	ErrorCode   *string    `json:"error_code"`
 }
 type Details struct {
 	Execution

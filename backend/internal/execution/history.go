@@ -59,7 +59,7 @@ func (s *Store) Details(ctx context.Context, owner, id string) (Details, error) 
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT ordinal,number,state,started_at,ended_at,error_code FROM platform.execution_attempts
+		rows, err = tx.Query(ctx, `SELECT ordinal,number,state,started_at,ended_at,error_code,(file_usage->>'failed_index')::int FROM platform.execution_attempts
     WHERE execution_id=$1 ORDER BY ordinal, number`, id)
 		if err != nil {
 			return err
@@ -67,7 +67,7 @@ func (s *Store) Details(ctx context.Context, owner, id string) (Details, error) 
 		for rows.Next() {
 			var ordinal int
 			var a Attempt
-			if err := rows.Scan(&ordinal, &a.Number, &a.State, &a.StartedAt, &a.EndedAt, &a.ErrorCode); err != nil {
+			if err := rows.Scan(&ordinal, &a.Number, &a.State, &a.StartedAt, &a.EndedAt, &a.ErrorCode, &a.FailedIndex); err != nil {
 				rows.Close()
 				return err
 			}

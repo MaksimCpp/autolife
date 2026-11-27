@@ -82,19 +82,24 @@ func (s *Store) consume(ctx context.Context) error {
 		_, err := tx.Exec(ctx, `WITH batch AS (
     SELECT e.event_id,e.type,e.payload FROM platform.outbox_events e
     WHERE e.type IN ('execution.created','execution.started','execution.succeeded','execution.failed','execution.cancelled','execution.timed_out',
-      'step.started','step.succeeded','step.failed','step.retry_scheduled','step.skipped')
+      'step.started','step.succeeded','step.failed','step.retry_scheduled','step.skipped','file.action_completed')
     AND NOT EXISTS(SELECT 1 FROM platform.outbox_consumptions c WHERE c.consumer='execution_metrics' AND c.event_id=e.event_id)
     ORDER BY e.occurred_at,e.event_id LIMIT 100
    ), accepted AS (
     INSERT INTO platform.outbox_consumptions(consumer,event_id)
     SELECT 'execution_metrics',event_id FROM batch ON CONFLICT DO NOTHING RETURNING event_id
    )
-   INSERT INTO platform.execution_event_totals(type,outcome,count,duration_ms)
-   SELECT b.type,coalesce(b.payload->>'outcome',''),count(*),sum(coalesce((b.payload->>'duration_ms')::bigint,0))
+   INSERT INTO platform.execution_event_totals(type,outcome,count,duration_ms,input_bytes,output_bytes,file_count)
+   SELECT b.type,coalesce(b.payload->>'outcome',''),count(*),sum(coalesce((b.payload->>'duration_ms')::bigint,0)),
+    sum(coalesce((b.payload->>'input_bytes')::bigint,0)),sum(coalesce((b.payload->>'output_bytes')::bigint,0)),
+    sum(coalesce((b.payload->>'output_count')::bigint,0))
    FROM batch b JOIN accepted a USING(event_id) GROUP BY b.type,coalesce(b.payload->>'outcome','')
    ON CONFLICT(type,outcome) DO UPDATE SET
      count=platform.execution_event_totals.count+excluded.count,
-     duration_ms=platform.execution_event_totals.duration_ms+excluded.duration_ms`)
+     duration_ms=platform.execution_event_totals.duration_ms+excluded.duration_ms,
+     input_bytes=platform.execution_event_totals.input_bytes+excluded.input_bytes,
+     output_bytes=platform.execution_event_totals.output_bytes+excluded.output_bytes,
+     file_count=platform.execution_event_totals.file_count+excluded.file_count`)
 		return err
 	})
 }
@@ -103,7 +108,7 @@ func (s *Store) consume(ctx context.Context) error {
 func (s *Store) Metrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	rows, err := s.Pool.Query(ctx, `SELECT type,outcome,count,duration_ms FROM platform.execution_event_totals ORDER BY type,outcome`)
+	rows, err := s.Pool.Query(ctx, `SELECT type,outcome,count,duration_ms,input_bytes,output_bytes,file_count FROM platform.execution_event_totals ORDER BY type,outcome`)
 	if err != nil {
 		w.WriteHeader(503)
 		return
@@ -111,14 +116,17 @@ func (s *Store) Metrics(w http.ResponseWriter, r *http.Request) {
 	var body strings.Builder
 	for rows.Next() {
 		var kind, outcome string
-		var count, duration int64
-		if err := rows.Scan(&kind, &outcome, &count, &duration); err != nil {
+		var count, duration, input, output, files int64
+		if err := rows.Scan(&kind, &outcome, &count, &duration, &input, &output, &files); err != nil {
 			rows.Close()
 			w.WriteHeader(503)
 			return
 		}
 		fmt.Fprintf(&body, "autolife_execution_events_total{event=%q,outcome=%q} %d\n", kind, outcome, count)
 		fmt.Fprintf(&body, "autolife_execution_event_duration_milliseconds_total{event=%q,outcome=%q} %d\n", kind, outcome, duration)
+		if kind == "file.action_completed" {
+			fmt.Fprintf(&body, "autolife_file_action_input_bytes_total{outcome=%q} %d\nautolife_file_action_output_bytes_total{outcome=%q} %d\nautolife_file_action_outputs_total{outcome=%q} %d\n", outcome, input, outcome, output, outcome, files)
+		}
 	}
 	rows.Close()
 	if rows.Err() != nil {
