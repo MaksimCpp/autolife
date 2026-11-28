@@ -59,7 +59,7 @@ func (s *Store) Details(ctx context.Context, owner, id string) (Details, error) 
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT ordinal,number,state,started_at,ended_at,error_code,(file_usage->>'failed_index')::int FROM platform.execution_attempts
+		rows, err = tx.Query(ctx, `SELECT ordinal,number,state,started_at,ended_at,error_code,(file_usage->>'failed_index')::int,(file_usage->>'input_count')::int,(file_usage->>'output_count')::int FROM platform.execution_attempts
     WHERE execution_id=$1 ORDER BY ordinal, number`, id)
 		if err != nil {
 			return err
@@ -67,7 +67,7 @@ func (s *Store) Details(ctx context.Context, owner, id string) (Details, error) 
 		for rows.Next() {
 			var ordinal int
 			var a Attempt
-			if err := rows.Scan(&ordinal, &a.Number, &a.State, &a.StartedAt, &a.EndedAt, &a.ErrorCode, &a.FailedIndex); err != nil {
+			if err := rows.Scan(&ordinal, &a.Number, &a.State, &a.StartedAt, &a.EndedAt, &a.ErrorCode, &a.FailedIndex, &a.InputCount, &a.OutputCount); err != nil {
 				rows.Close()
 				return err
 			}
@@ -77,17 +77,17 @@ func (s *Store) Details(ctx context.Context, owner, id string) (Details, error) 
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT r.file_id::text,r.role,
+		rows, err = tx.Query(ctx, `SELECT r.file_id::text,r.role,r.position,
    NOT coalesce(f.state='ready' AND f.expires_at>clock_timestamp(),false)
    FROM platform.execution_file_refs r LEFT JOIN platform.files f ON f.id=r.live_file_id AND f.owner_id=r.owner_id
-   WHERE r.owner_id=$1 AND r.execution_id=$2 AND (r.role='input' OR $3) ORDER BY r.role,r.file_id`, owner, id, result.Status == Succeeded)
+   WHERE r.owner_id=$1 AND r.execution_id=$2 AND (r.role='input' OR $3) ORDER BY r.role,r.position NULLS LAST,r.file_id`, owner, id, result.Status == Succeeded)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var f FileStatus
-			if err := rows.Scan(&f.ID, &f.Role, &f.Expired); err != nil {
+			if err := rows.Scan(&f.ID, &f.Role, &f.Position, &f.Expired); err != nil {
 				return err
 			}
 			result.Files = append(result.Files, f)
@@ -146,7 +146,9 @@ func (s *Store) Usage(ctx context.Context, owner string) (Usage, error) {
 func ExportHistory(ctx context.Context, tx pgx.Tx, owner string) ([]byte, error) {
 	var out []byte
 	err := tx.QueryRow(ctx, `SELECT coalesce(jsonb_agg((to_jsonb(e)-'owner_id'-'lease_until'-'fence')
-   || jsonb_build_object('steps',coalesce((SELECT jsonb_agg(to_jsonb(s)-'execution_id' ORDER BY s.ordinal)
+   || jsonb_build_object('quick_definition',(SELECT q.definition FROM platform.quick_execution_snapshots q
+      WHERE q.owner_id=e.owner_id AND q.id=e.quick_snapshot_id),
+    'steps',coalesce((SELECT jsonb_agg(to_jsonb(s)-'execution_id' ORDER BY s.ordinal)
       FROM platform.execution_steps s WHERE s.execution_id=e.id),'[]'::jsonb))
    ORDER BY e.queued_at,e.id),'[]'::jsonb)
    FROM platform.executions e WHERE e.owner_id=$1`, owner).Scan(&out)

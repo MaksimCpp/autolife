@@ -62,6 +62,18 @@ func (s *Service) Routes(r chi.Router, auth, csrf func(http.Handler) http.Handle
 			}
 			httpserver.WriteJSON(w, 200, f)
 		})
+		r.Get("/{id}/preview", func(w http.ResponseWriter, r *http.Request) {
+			data, err := s.preview(r.Context(), owner(r), chi.URLParam(r, "id"))
+			if err != nil {
+				respondError(w, r, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(data)
+		})
 		r.With(csrf).Delete("/{id}", func(w http.ResponseWriter, r *http.Request) {
 			id := chi.URLParam(r, "id")
 			if !validID(id) {

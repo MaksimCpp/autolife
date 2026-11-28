@@ -1,6 +1,7 @@
 package fileflow
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,11 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"autolife/backend/internal/htmlproto"
+	"autolife/backend/internal/officeproto"
+	"autolife/backend/internal/svgcheck"
+	"autolife/backend/internal/tableproto"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -30,6 +36,7 @@ type Service struct {
 	Store             *Store
 	Objects           Objects
 	Inspector         Inspector
+	Previewer         Previewer
 	StorageBytes      int64
 	ConcurrentUploads int64
 	Slots             chan struct{}
@@ -100,15 +107,58 @@ func (s *Service) Upload(ctx context.Context, owner, name, declared string, src 
 		return File{}, err
 	}
 	mime := http.DetectContentType(header)
-	profile, ok := map[string]string{"image/jpeg": "image", "image/png": "image", "image/webp": "image", "application/pdf": "pdf"}[mime]
-	if !ok || (declared != "" && declared != "application/octet-stream" && declared != mime) {
+	profile := map[string]string{"image/jpeg": "image", "image/png": "image", "image/webp": "image", "application/pdf": "pdf"}[mime]
+	generic := declared == "" || declared == "application/octet-stream"
+	if declared == htmlproto.MIME && (mime == "text/html; charset=utf-8" || mime == "text/plain; charset=utf-8") {
+		if size > htmlproto.MaxInput {
+			return File{}, ErrSize
+		}
+		profile, mime = htmlproto.InspectProfile, htmlproto.MIME
+	}
+	if declared == tableproto.CSV && mime == "text/plain; charset=utf-8" {
+		if size > tableproto.MaxBytes {
+			return File{}, ErrSize
+		}
+		profile, mime = tableproto.InspectProfile, tableproto.CSV
+	}
+	if declared == svgcheck.MIME && profile == "" && mime != "application/zip" {
+		if size > svgcheck.MaxBytes {
+			return File{}, ErrSize
+		}
+		profile, mime = "image", svgcheck.MIME
+	}
+	if profile == "" {
+		switch mime {
+		case "application/zip":
+			profile = "office"
+		case "application/octet-stream":
+			if bytes.HasPrefix(header, []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1}) {
+				profile = "office"
+			}
+		case "text/plain; charset=utf-8":
+			if declared == "text/plain" {
+				profile, mime = "office", "text/plain"
+			}
+		}
+		if profile == "" || (!generic && officeproto.Extension(declared) == "") {
+			return File{}, ErrType
+		}
+		if size > officeproto.MaxInput {
+			return File{}, ErrSize
+		}
+	} else if !generic && declared != mime {
 		return File{}, ErrType
 	}
 	verified, err := s.Inspector.Inspect(ctx, file.ID, profile, io.NewSectionReader(spool, 0, size), size)
 	if err != nil {
 		return File{}, err
 	}
-	if verified != mime {
+	if profile == "office" {
+		if !matchesOfficeContainer(mime, verified) || (!generic && verified != declared) {
+			return File{}, ErrInvalid
+		}
+		mime = verified
+	} else if verified != mime {
 		return File{}, ErrInvalid
 	}
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
@@ -121,6 +171,19 @@ func (s *Service) Upload(ctx context.Context, owner, name, declared string, src 
 	})
 	published = err == nil
 	return result, err
+}
+
+func matchesOfficeContainer(sniffed, verified string) bool {
+	switch officeproto.Extension(verified) {
+	case "doc", "xls", "ppt":
+		return sniffed == "application/octet-stream"
+	case "docx", "xlsx", "pptx", "odt", "ods", "odp":
+		return sniffed == "application/zip"
+	case "txt":
+		return sniffed == "text/plain"
+	default:
+		return false
+	}
 }
 
 func (s *Store) reserve(ctx context.Context, owner, name string, storage, parallel int64) (File, error) {

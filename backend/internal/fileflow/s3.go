@@ -11,6 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
+
+	"autolife/backend/internal/execution"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -82,6 +86,9 @@ func (s *S3) Put(ctx context.Context, key string, body io.ReadSeeker, size int64
 		Bucket: aws.String(s.bucket), Key: aws.String(key), Body: body, ContentLength: aws.Int64(size),
 		ContentType: aws.String(contentType), ChecksumSHA256: aws.String(base64.StdEncoding.EncodeToString(sum[:])),
 	})
+	if err == nil {
+		execution.ReportObjectTransfer(ctx, true, size)
+	}
 	return err
 }
 
@@ -155,5 +162,27 @@ func (s *S3) Open(ctx context.Context, key string) (io.ReadCloser, int64, error)
 		_ = output.Body.Close()
 		return nil, 0, ErrSize
 	}
-	return output.Body, size, nil
+	if _, active := execution.AttemptID(ctx); !active {
+		return output.Body, size, nil
+	}
+	return &measuredObject{body: output.Body, ctx: ctx}, size, nil
+}
+
+type measuredObject struct {
+	body io.ReadCloser
+	ctx  context.Context
+	once sync.Once
+	read atomic.Int64
+}
+
+func (r *measuredObject) Read(buf []byte) (int, error) {
+	n, err := r.body.Read(buf)
+	r.read.Add(int64(n))
+	return n, err
+}
+
+func (r *measuredObject) Close() error {
+	err := r.body.Close()
+	r.once.Do(func() { execution.ReportObjectTransfer(r.ctx, false, r.read.Load()) })
+	return err
 }

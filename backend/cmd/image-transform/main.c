@@ -71,11 +71,13 @@ static int transform(const unsigned char *header) {
     int status = 20;
     uint32_t max_w = dimension(header + 10), max_h = dimension(header + 14);
 
-    if (memcmp(header, "ALI1", 4) || target > WEBP ||
+    int svg = !memcmp(header, "ALS1", 4);
+    if ((!svg && memcmp(header, "ALI1", 4)) || target > WEBP ||
+        (svg && ((target != PNG && target != JPEG) || flags)) ||
         quality < 1 || quality > 100 || (flags & ~15) ||
         ((flags & 8) && (!max_w || !max_h || max_w > MAX_PIXELS || max_h > MAX_PIXELS))) goto done;
 
-    if (load(&source, &original) ||
+    if ((svg ? vips_svgload(INPUT, &source, "unlimited", FALSE, NULL) : load(&source, &original)) ||
         !bounded_dimensions(vips_image_get_width(source), vips_image_get_height(source)) ||
         vips_image_get_n_pages(source) != 1 ||
         vips_autorot(source, &oriented, NULL)) goto done;

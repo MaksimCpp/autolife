@@ -3,6 +3,7 @@ package pdfproto
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,17 +19,28 @@ const (
 	MaxHeader          = 16384
 )
 const MaxRequest = MaxBytes + MaxHeader + 4
-const MaxResponse = MaxBytes + 4 + MaxPages*8
+const MaxResponse = MaxBytes + 8 + MaxPages*12
+
+type SourcePage struct {
+	Document uint16 `json:"input_index"`
+	Page     uint16 `json:"page"`
+}
 
 var ErrInvalid = errors.New("invalid PDF operation or frame")
 
 type Request struct {
-	Operation   string   `json:"operation"`
-	Ranges      []string `json:"ranges,omitempty"`
-	PageSize    string   `json:"page_size,omitempty"`
-	Orientation string   `json:"orientation,omitempty"`
-	Fit         string   `json:"fit,omitempty"`
-	Sizes       []int64  `json:"sizes"`
+	Operation      string   `json:"operation"`
+	Ranges         []string `json:"ranges,omitempty"`
+	PageSize       string   `json:"page_size,omitempty"`
+	Orientation    string   `json:"orientation,omitempty"`
+	Fit            string   `json:"fit,omitempty"`
+	Format         string   `json:"format,omitempty"`
+	DPI            int      `json:"dpi,omitempty"`
+	MaxRasterPages int      `json:"max_pages,omitempty"`
+	Quality        int      `json:"quality,omitempty"`
+	Background     string   `json:"background,omitempty"`
+	Alpha          bool     `json:"alpha,omitempty"`
+	Sizes          []int64  `json:"sizes"`
 }
 
 func (q Request) Validate() error {
@@ -43,6 +55,21 @@ func (q Request) Validate() error {
 		total += n
 	}
 	if total > MaxBytes {
+		return ErrInvalid
+	}
+	if q.Operation == "rasterize" {
+		if q.PageSize != "" || q.Orientation != "" || q.Fit != "" || q.DPI < 72 || q.DPI > 300 || q.MaxRasterPages < 1 || q.MaxRasterPages > MaxPages ||
+			(q.Format != "png" && q.Format != "jpeg") || q.Quality < 1 || q.Quality > 100 ||
+			q.Alpha && q.Format != "png" || len(q.Background) != 7 || q.Background[0] != '#' {
+			return ErrInvalid
+		}
+		if _, err := hex.DecodeString(q.Background[1:]); err != nil {
+			return ErrInvalid
+		}
+		_, err := Ranges(q.Ranges, MaxPages)
+		return err
+	}
+	if q.Format != "" || q.DPI != 0 || q.MaxRasterPages != 0 || q.Quality != 0 || q.Background != "" || q.Alpha {
 		return ErrInvalid
 	}
 	if q.Operation == "create" {

@@ -72,7 +72,16 @@ func (s *Store) reconcile(ctx context.Context) error {
 				return err
 			}
 		}
-		_, err = tx.Exec(ctx, "DELETE FROM platform.executions WHERE terminal_at<clock_timestamp()-interval '30 days'")
+		if _, err := tx.Exec(ctx, "DELETE FROM platform.executions WHERE terminal_at<clock_timestamp()-interval '30 days'"); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `WITH expired AS (
+ SELECT q.owner_id,q.id FROM platform.quick_execution_snapshots q
+  WHERE q.created_at<clock_timestamp()-interval '31 days'
+  AND NOT EXISTS(SELECT 1 FROM platform.executions e WHERE e.owner_id=q.owner_id AND e.quick_snapshot_id=q.id)
+  LIMIT 100)
+ DELETE FROM platform.quick_execution_snapshots q USING expired
+ WHERE q.owner_id=expired.owner_id AND q.id=expired.id`)
 		return err
 	})
 }
@@ -82,24 +91,35 @@ func (s *Store) consume(ctx context.Context) error {
 		_, err := tx.Exec(ctx, `WITH batch AS (
     SELECT e.event_id,e.type,e.payload FROM platform.outbox_events e
     WHERE e.type IN ('execution.created','execution.started','execution.succeeded','execution.failed','execution.cancelled','execution.timed_out',
-      'step.started','step.succeeded','step.failed','step.retry_scheduled','step.skipped','file.action_completed')
+      'step.started','step.succeeded','step.failed','step.retry_scheduled','step.skipped','file.action_completed','file.action_attempted')
     AND NOT EXISTS(SELECT 1 FROM platform.outbox_consumptions c WHERE c.consumer='execution_metrics' AND c.event_id=e.event_id)
     ORDER BY e.occurred_at,e.event_id LIMIT 100
    ), accepted AS (
     INSERT INTO platform.outbox_consumptions(consumer,event_id)
     SELECT 'execution_metrics',event_id FROM batch ON CONFLICT DO NOTHING RETURNING event_id
    )
-   INSERT INTO platform.execution_event_totals(type,outcome,count,duration_ms,input_bytes,output_bytes,file_count)
+   INSERT INTO platform.execution_event_totals(type,outcome,count,duration_ms,input_bytes,output_bytes,file_count,sampled_jobs,cpu_ns,peak_memory_bytes,storage_gets,storage_puts,storage_read_bytes,storage_write_bytes)
    SELECT b.type,coalesce(b.payload->>'outcome',''),count(*),sum(coalesce((b.payload->>'duration_ms')::bigint,0)),
     sum(coalesce((b.payload->>'input_bytes')::bigint,0)),sum(coalesce((b.payload->>'output_bytes')::bigint,0)),
-    sum(coalesce((b.payload->>'output_count')::bigint,0))
+    sum(coalesce((b.payload->>'output_count')::bigint,0)),
+    sum(coalesce((b.payload->>'sampled_jobs')::bigint,0)),sum(coalesce((b.payload->>'cpu_ns')::bigint,0)),
+    max(coalesce((b.payload->>'peak_memory_bytes')::bigint,0)),
+    sum(coalesce((b.payload->>'storage_gets')::bigint,0)),sum(coalesce((b.payload->>'storage_puts')::bigint,0)),
+    sum(coalesce((b.payload->>'storage_read_bytes')::bigint,0)),sum(coalesce((b.payload->>'storage_write_bytes')::bigint,0))
    FROM batch b JOIN accepted a USING(event_id) GROUP BY b.type,coalesce(b.payload->>'outcome','')
    ON CONFLICT(type,outcome) DO UPDATE SET
      count=platform.execution_event_totals.count+excluded.count,
      duration_ms=platform.execution_event_totals.duration_ms+excluded.duration_ms,
      input_bytes=platform.execution_event_totals.input_bytes+excluded.input_bytes,
      output_bytes=platform.execution_event_totals.output_bytes+excluded.output_bytes,
-     file_count=platform.execution_event_totals.file_count+excluded.file_count`)
+     file_count=platform.execution_event_totals.file_count+excluded.file_count,
+     sampled_jobs=platform.execution_event_totals.sampled_jobs+excluded.sampled_jobs,
+     cpu_ns=platform.execution_event_totals.cpu_ns+excluded.cpu_ns,
+     peak_memory_bytes=greatest(platform.execution_event_totals.peak_memory_bytes,excluded.peak_memory_bytes),
+     storage_gets=platform.execution_event_totals.storage_gets+excluded.storage_gets,
+     storage_puts=platform.execution_event_totals.storage_puts+excluded.storage_puts,
+     storage_read_bytes=platform.execution_event_totals.storage_read_bytes+excluded.storage_read_bytes,
+     storage_write_bytes=platform.execution_event_totals.storage_write_bytes+excluded.storage_write_bytes`)
 		return err
 	})
 }
@@ -108,7 +128,7 @@ func (s *Store) consume(ctx context.Context) error {
 func (s *Store) Metrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	rows, err := s.Pool.Query(ctx, `SELECT type,outcome,count,duration_ms,input_bytes,output_bytes,file_count FROM platform.execution_event_totals ORDER BY type,outcome`)
+	rows, err := s.Pool.Query(ctx, `SELECT type,outcome,count,duration_ms,input_bytes,output_bytes,file_count,sampled_jobs,cpu_ns,peak_memory_bytes,storage_gets,storage_puts,storage_read_bytes,storage_write_bytes FROM platform.execution_event_totals ORDER BY type,outcome`)
 	if err != nil {
 		w.WriteHeader(503)
 		return
@@ -116,14 +136,22 @@ func (s *Store) Metrics(w http.ResponseWriter, r *http.Request) {
 	var body strings.Builder
 	for rows.Next() {
 		var kind, outcome string
-		var count, duration, input, output, files int64
-		if err := rows.Scan(&kind, &outcome, &count, &duration, &input, &output, &files); err != nil {
+		var count, duration, input, output, files, sampled, cpu, memory, gets, puts, read, written int64
+		if err := rows.Scan(&kind, &outcome, &count, &duration, &input, &output, &files, &sampled, &cpu, &memory, &gets, &puts, &read, &written); err != nil {
 			rows.Close()
 			w.WriteHeader(503)
 			return
 		}
 		fmt.Fprintf(&body, "autolife_execution_events_total{event=%q,outcome=%q} %d\n", kind, outcome, count)
 		fmt.Fprintf(&body, "autolife_execution_event_duration_milliseconds_total{event=%q,outcome=%q} %d\n", kind, outcome, duration)
+		if kind == "file.action_attempted" {
+			fmt.Fprintf(&body, "autolife_file_attempt_duration_milliseconds_total{outcome=%q} %d\nautolife_file_attempt_input_bytes_total{outcome=%q} %d\nautolife_file_attempt_output_bytes_total{outcome=%q} %d\n", outcome, duration, outcome, input, outcome, output)
+			fmt.Fprintf(&body, "autolife_file_attempt_sampled_jobs_total{outcome=%q} %d\n", outcome, sampled)
+			fmt.Fprintf(&body, "autolife_file_attempt_s3_requests_total{outcome=%q,operation=\"get\"} %d\nautolife_file_attempt_s3_requests_total{outcome=%q,operation=\"put\"} %d\nautolife_file_attempt_s3_bytes_total{outcome=%q,operation=\"get\"} %d\nautolife_file_attempt_s3_bytes_total{outcome=%q,operation=\"put\"} %d\n", outcome, gets, outcome, puts, outcome, read, outcome, written)
+			if sampled > 0 {
+				fmt.Fprintf(&body, "autolife_file_attempt_sampled_cpu_nanoseconds_total{outcome=%q} %d\nautolife_file_attempt_sampled_peak_memory_bytes{outcome=%q} %d\n", outcome, cpu, outcome, memory)
+			}
+		}
 		if kind == "file.action_completed" {
 			fmt.Fprintf(&body, "autolife_file_action_input_bytes_total{outcome=%q} %d\nautolife_file_action_output_bytes_total{outcome=%q} %d\nautolife_file_action_outputs_total{outcome=%q} %d\n", outcome, input, outcome, output, outcome, files)
 		}

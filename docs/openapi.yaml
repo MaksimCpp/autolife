@@ -748,7 +748,7 @@ paths:
         default: {$ref: '#/components/responses/FileError'}
     post:
       operationId: uploadFile
-      description: Requires a session, Origin and CSRF. One file, 1 to 100000000 bytes. JPEG, PNG, WebP and static PDF undergo mandatory isolated inspection.
+      description: Requires a session, Origin and CSRF. One file, 1 to 100000000 bytes. JPEG, PNG, WebP and static PDF undergo mandatory isolated inspection. With the Office inspector enabled, DOC/DOCX, XLS/XLSX, PPT/PPTX, ODT/ODS/ODP and UTF-8 TXT undergo the same publication gate with a 32 MiB input limit. The file part must declare text/plain for TXT, text/csv for CSV, text/html for HTML, or image/svg+xml for SVG. Additional types require a matching isolated inspector.
       parameters:
       - $ref: '#/components/parameters/FileOrigin'
       - $ref: '#/components/parameters/FileCSRF'
@@ -792,6 +792,19 @@ paths:
         '204':
           description: File is inaccessible and scheduled for removal
         default: {$ref: '#/components/responses/FileError'}
+  /api/v1/files/{id}/preview:
+    parameters:
+    - $ref: '#/components/parameters/FileID'
+    get:
+      operationId: previewFile
+      description: Requires the current owner's session and an unexpired JPEG, PNG or WebP file. Renders a separate isolated JPEG derivative, up to 512 pixels per edge and 1 MiB.
+      responses:
+        '200':
+          description: Private uncached JPEG derivative
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        default: {$ref: '#/components/responses/FileError'}
   /api/v1/files/{id}/download:
     parameters:
     - $ref: '#/components/parameters/FileID'
@@ -815,7 +828,7 @@ paths:
   /api/v1/actions:
     get:
       operationId: listWorkflowActions
-      description: Requires a session. Returns only available action versions. Image and PDF actions require their available, isolated launcher profiles.
+      description: Requires a session. Returns only available action versions. Image, PDF, Office, HTML and table actions require their available, isolated launcher profiles.
       responses:
         '200':
           description: Available actions
@@ -1173,6 +1186,40 @@ paths:
               schema: {$ref: '#/components/schemas/ExecutionDetails'}
         default: {$ref: '#/components/responses/WorkflowError'}
   /api/v1/executions:
+    post:
+      operationId: startQuickExecution
+      description: Requires a session, Origin and CSRF. Runs one available FileFlow action from an immutable server-created snapshot.
+      parameters:
+      - $ref: '#/components/parameters/FileOrigin'
+      - $ref: '#/components/parameters/FileCSRF'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action_type, action_version, files]
+              properties:
+                action_type: {type: string}
+                action_version: {type: integer, minimum: 1}
+                config: {type: object}
+                files:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: {type: string, format: uuid}
+      responses:
+        '202':
+          description: Durable execution accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionAccepted'}
+        default: {$ref: '#/components/responses/WorkflowError'}
     get:
       operationId: listExecutions
       description: Requires a session.
@@ -1291,8 +1338,9 @@ components:
       required: [id, workflow_id, status, queued_at, start_deadline]
       properties:
         id: {type: string, format: uuid}
-        workflow_id: {type: string, format: uuid}
+        workflow_id: {type: [string, 'null'], format: uuid}
         version_id: {type: [string, 'null'], format: uuid}
+        quick_snapshot_id: {type: [string, 'null'], format: uuid}
         snapshot_id: {type: [string, 'null'], format: uuid}
         status: {$ref: '#/components/schemas/ExecutionState'}
         queued_at: {type: string, format: date-time}
@@ -1327,7 +1375,9 @@ components:
                     required: [number, state, started_at]
                     properties:
                       number: {type: integer, minimum: 1, maximum: 3}
-                      failed_index: {type: integer, minimum: 1, maximum: 50, description: One-based failed input in an image batch}
+                      input_count: {type: integer, minimum: 0, maximum: 50}
+                      output_count: {type: integer, minimum: 0, maximum: 500}
+                      failed_index: {type: integer, minimum: 1, maximum: 50, description: One-based failed input in a file batch}
                       state: {type: string}
                       started_at: {type: string, format: date-time}
                       ended_at: {type: [string, 'null'], format: date-time}
@@ -1341,6 +1391,7 @@ components:
                 id: {type: string, format: uuid}
                 role: {enum: [input, output]}
                 expired: {type: boolean}
+                position: {type: integer, minimum: 0}
     ExecutionPage:
       type: object
       required: [executions, next_cursor]

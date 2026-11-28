@@ -21,5 +21,6 @@ RUN apk add --no-cache qpdf=12.2.0-r0 vips=8.17.3-r1 python3 py3-pillow
 COPY --from=go-build /autolife-pdf /usr/local/bin/autolife-pdf
 COPY --from=image-build /autolife-image /usr/local/bin/autolife-image
 COPY --from=python-build /opt/img2pdf /opt/img2pdf
+COPY cmd/pdf-transform/rasterize.py /usr/local/lib/autolife/rasterize.py
 ENV PYTHONPATH=/opt/img2pdf PYTHONDONTWRITEBYTECODE=1
 ENTRYPOINT ["/usr/local/bin/autolife-pdf"]

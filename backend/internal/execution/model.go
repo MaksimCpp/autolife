@@ -49,20 +49,21 @@ var (
 )
 
 type Execution struct {
-	ID            string                     `json:"id"`
-	OwnerID       string                     `json:"-"`
-	WorkflowID    string                     `json:"workflow_id"`
-	VersionID     *string                    `json:"version_id"`
-	SnapshotID    *string                    `json:"snapshot_id"`
-	Status        State                      `json:"status"`
-	QueuedAt      time.Time                  `json:"queued_at"`
-	StartDeadline time.Time                  `json:"start_deadline"`
-	StartedAt     *time.Time                 `json:"started_at"`
-	RunDeadline   *time.Time                 `json:"run_deadline"`
-	TerminalAt    *time.Time                 `json:"terminal_at"`
-	ErrorCode     *string                    `json:"error_code"`
-	Outputs       map[string]workflow.Values `json:"outputs,omitempty"`
-	Fence         int64                      `json:"-"`
+	ID              string                     `json:"id"`
+	OwnerID         string                     `json:"-"`
+	WorkflowID      *string                    `json:"workflow_id"`
+	VersionID       *string                    `json:"version_id"`
+	QuickSnapshotID *string                    `json:"quick_snapshot_id"`
+	SnapshotID      *string                    `json:"snapshot_id"`
+	Status          State                      `json:"status"`
+	QueuedAt        time.Time                  `json:"queued_at"`
+	StartDeadline   time.Time                  `json:"start_deadline"`
+	StartedAt       *time.Time                 `json:"started_at"`
+	RunDeadline     *time.Time                 `json:"run_deadline"`
+	TerminalAt      *time.Time                 `json:"terminal_at"`
+	ErrorCode       *string                    `json:"error_code"`
+	Outputs         map[string]workflow.Values `json:"outputs,omitempty"`
+	Fence           int64                      `json:"-"`
 }
 
 func (e Execution) Deadline() time.Time {
@@ -82,6 +83,8 @@ type StepExecution struct {
 	Attempts  []Attempt `json:"attempts"`
 }
 type Attempt struct {
+	InputCount  *int       `json:"input_count,omitempty"`
+	OutputCount *int       `json:"output_count,omitempty"`
 	FailedIndex *int       `json:"failed_index,omitempty"`
 	Number      int        `json:"number"`
 	State       string     `json:"state"`
@@ -95,7 +98,8 @@ type Details struct {
 	Files []FileStatus    `json:"files"`
 }
 type FileStatus struct {
-	ID      string `json:"id"`
-	Role    string `json:"role"`
-	Expired bool   `json:"expired"`
+	ID       string `json:"id"`
+	Role     string `json:"role"`
+	Position *int   `json:"position,omitempty"`
+	Expired  bool   `json:"expired"`
 }

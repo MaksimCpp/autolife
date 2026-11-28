@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"sort"
 	"time"
 
 	"autolife/backend/internal/workflow"
@@ -85,7 +84,8 @@ func (s *Store) run(ctx context.Context, id string) error {
 		}
 		err := tx.QueryRow(ctx, `SELECT coalesce(
       (SELECT definition FROM platform.workflow_versions WHERE id=e.version_id AND owner_id=e.owner_id AND workflow_id=e.workflow_id),
-      (SELECT definition FROM platform.draft_execution_snapshots WHERE id=e.snapshot_id AND owner_id=e.owner_id AND workflow_id=e.workflow_id)),
+      (SELECT definition FROM platform.draft_execution_snapshots WHERE id=e.snapshot_id AND owner_id=e.owner_id AND workflow_id=e.workflow_id),
+      (SELECT definition FROM platform.quick_execution_snapshots WHERE id=e.quick_snapshot_id AND owner_id=e.owner_id)),
       trigger_values,user_inputs FROM platform.executions e WHERE e.id=$1`, id).
 			Scan(&raw, &p.data.Trigger, &p.data.UserInputs)
 		if err != nil {
@@ -231,8 +231,10 @@ func (s *Store) run(ctx context.Context, id string) error {
 		if step.TimeoutSeconds != nil {
 			stepCtx, stop = context.WithTimeout(run, time.Duration(*step.TimeoutSeconds)*time.Second)
 		}
-		stepCtx = context.WithValue(stepCtx, attemptKey{}, attemptScope{s, p.Execution, ordinal, n})
+		scope := attemptScope{s, p.Execution, ordinal, n, new(storageUsage)}
+		stepCtx = context.WithValue(stepCtx, attemptKey{}, scope)
 		values, callErr := s.Registry.Invoke(stepCtx, step, inputs, lookup)
+		_ = scope.persistStorageUsage(stepCtx)
 		if values == nil && callErr == nil {
 			values = workflow.Values{}
 		}
@@ -244,10 +246,12 @@ func (s *Store) run(ctx context.Context, id string) error {
 			return ErrLease
 		}
 		refs := map[string]bool{}
+		ids := []string{}
 		if callErr == nil {
 			callErr = s.Registry.ValidateOutput(stepCtx, step, values, func(ctx context.Context, id string) (string, error) {
 				mime, err := lookup(ctx, id)
-				if err == nil && mime != "" {
+				if err == nil && mime != "" && !refs[id] {
+					ids = append(ids, id)
 					refs[id] = true
 				}
 				return mime, err
@@ -256,11 +260,6 @@ func (s *Store) run(ctx context.Context, id string) error {
 				callErr = ErrInputs
 			}
 		}
-		ids := make([]string, 0, len(refs))
-		for id := range refs {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
 		stepErr := stepCtx.Err()
 		stop()
 		if callErr == nil && stepErr != nil {

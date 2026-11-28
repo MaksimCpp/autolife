@@ -12,6 +12,7 @@ import (
 	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow/processing"
 	"autolife/backend/internal/sandbox"
+	"autolife/backend/internal/svgcheck"
 	"autolife/backend/internal/workflow"
 )
 
@@ -29,6 +30,10 @@ type Actions struct {
 var formats = []string{"image/jpeg", "image/png", "image/webp"}
 
 func Register(registry *workflow.Registry, objects processing.Storage, launcher transformer) error {
+	return RegisterFormats(registry, objects, launcher, false)
+}
+
+func RegisterFormats(registry *workflow.Registry, objects processing.Storage, launcher transformer, svg bool) error {
 	actions := Actions{objects, launcher}
 	for _, operation := range []string{"convert", "compress", "resize"} {
 		config := workflow.Fields{}
@@ -46,12 +51,20 @@ func Register(registry *workflow.Registry, objects processing.Storage, launcher 
 			config["upscale"] = workflow.Field{Kind: "boolean", Optional: true}
 			config["preserve_aspect_ratio"] = workflow.Field{Kind: "boolean", Optional: true}
 		}
+		inputFormats := formats
+		if operation == "convert" && svg {
+			inputFormats = append(append([]string(nil), formats...), svgcheck.MIME)
+		}
 		ports := func(config workflow.Values) (workflow.Fields, workflow.Fields) {
 			source, target := formats, formats
 			switch operation {
 			case "convert":
-				if f := text(config, "format"); f != "" {
+				f := text(config, "format")
+				if f != "" {
 					target = []string{"image/" + f}
+				}
+				if f != "webp" {
+					source = inputFormats
 				}
 			case "compress":
 				switch text(config, "mode") {
@@ -72,9 +85,14 @@ func Register(registry *workflow.Registry, objects processing.Storage, launcher 
 				}
 			}
 		}
+		if operation == "convert" && svg {
+			for _, target := range []string{"image/png", "image/jpeg"} {
+				pairs = append(pairs, workflow.FormatPair{Input: svgcheck.MIME, Output: target})
+			}
+		}
 		err := registry.RegisterAction(workflow.ActionDefinition{
 			Descriptor: workflow.Descriptor{Key: workflow.Key{Type: "file.image." + operation, Version: 1}, Config: config,
-				Inputs: filePort(formats), Outputs: outputPort(formats), FormatPairs: pairs, Capability: "image-transform", ResourceProfile: "image-transform", MaxAttempts: 3},
+				Inputs: filePort(inputFormats), Outputs: outputPort(formats), FormatPairs: pairs, Capability: "image-transform", ResourceProfile: "image-transform", MaxAttempts: 3},
 			Available: func() bool { return objects != nil && launcher != nil && launcher.Available() },
 			ConfirmStopped: func(ctx context.Context, id string) (bool, error) {
 				if launcher == nil {
@@ -92,7 +110,7 @@ func Register(registry *workflow.Registry, objects processing.Storage, launcher 
 			},
 			Ports: ports,
 			Handler: func(ctx context.Context, cfg, in workflow.Values) (workflow.Values, error) {
-				return actions.apply(ctx, operation, cfg, in)
+				return actions.apply(ctx, operation, cfg, in, operation == "convert" && svg)
 			},
 		})
 		if err != nil {
@@ -192,7 +210,7 @@ type sizes struct {
 	input, output byte
 }
 
-func (a Actions) apply(ctx context.Context, operation string, cfg, in workflow.Values) (workflow.Values, error) {
+func (a Actions) apply(ctx context.Context, operation string, cfg, in workflow.Values, svg bool) (workflow.Values, error) {
 	var files []string
 	if json.Unmarshal(in["files"], &files) != nil || len(files) < 1 || len(files) > 50 {
 		return nil, execution.ErrInputs
@@ -215,7 +233,7 @@ func (a Actions) apply(ctx context.Context, operation string, cfg, in workflow.V
 			return nil, err
 		}
 		usage.InputCount++
-		out, size, err := a.one(ctx, attempt, id, i, base)
+		out, size, err := a.one(ctx, attempt, id, i, base, svg)
 		usage.InputBytes += size.Input
 		usage.InputFormat = mergeFormat(usage.InputFormat, size.input)
 		if err != nil {
@@ -227,6 +245,7 @@ func (a Actions) apply(ctx context.Context, operation string, cfg, in workflow.V
 		usage.OutputFormat = mergeFormat(usage.OutputFormat, size.output)
 		outputs = append(outputs, out)
 		measured = append(measured, size)
+		_ = execution.ReportFileUsage(ctx, usage)
 	}
 	ids, err := json.Marshal(outputs)
 	if err != nil {
@@ -239,32 +258,45 @@ func (a Actions) apply(ctx context.Context, operation string, cfg, in workflow.V
 	return workflow.Values{"files": ids, "sizes": summary}, nil
 }
 
-func (a Actions) one(ctx context.Context, attempt, id string, index int, header []byte) (string, sizes, error) {
+func (a Actions) one(ctx context.Context, attempt, id string, index int, header []byte, svg bool) (string, sizes, error) {
 	var measured sizes
-	key, err := execution.ObjectKey(ctx, id)
+	meta, err := execution.ObjectMetadata(ctx, id)
 	if err != nil {
 		return "", measured, err
 	}
-	body, bytesIn, err := a.objects.Open(ctx, key)
+	body, bytesIn, err := a.objects.Open(ctx, meta.Key)
 	if err != nil {
 		return "", measured, execution.ErrTemporary
 	}
 	defer body.Close()
+	if bytesIn != meta.Bytes {
+		return "", measured, execution.ErrInputs
+	}
 	measured.Input = bytesIn
 	var prefix [12]byte
-	if _, err := io.ReadFull(body, prefix[:]); err != nil {
-		return "", measured, execution.ErrInputs
-	}
-	inputFormat := detect(prefix[:])
-	measured.input = inputFormat
-	if inputFormat == 0 {
-		return "", measured, execution.ErrInputs
-	}
+	var source io.Reader = body
 	outputFormat := header[4]
-	if outputFormat == 0 {
-		outputFormat = inputFormat
+	if meta.MIME == svgcheck.MIME {
+		if !svg || outputFormat < 1 || outputFormat > 2 || bytesIn < 1 || bytesIn > svgcheck.MaxBytes {
+			return "", measured, execution.ErrInputs
+		}
+		header = bytes.Clone(header)
+		copy(header, "ALS1")
+		measured.input = 4
+	} else {
+		if _, err := io.ReadFull(body, prefix[:]); err != nil {
+			return "", measured, execution.ErrInputs
+		}
+		source = io.MultiReader(bytes.NewReader(prefix[:]), body)
+		measured.input = detect(prefix[:])
+		if measured.input == 0 {
+			return "", measured, execution.ErrInputs
+		}
+		if outputFormat == 0 {
+			outputFormat = measured.input
+		}
 	}
-	result, declared, err := a.sandbox.Transform(ctx, attempt, header, io.MultiReader(bytes.NewReader(prefix[:]), body), bytesIn)
+	result, declared, err := a.sandbox.Transform(ctx, attempt, header, source, bytesIn)
 	if err != nil {
 		return "", measured, err
 	}
@@ -302,7 +334,7 @@ func mergeFormat(current string, id byte) string {
 	if id == 0 {
 		return current
 	}
-	next := []string{"", "jpeg", "png", "webp"}[id]
+	next := []string{"", "jpeg", "png", "webp", "svg"}[id]
 	if current == "" || current == next {
 		return next
 	}

@@ -12,10 +12,15 @@ import (
 	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow"
 	"autolife/backend/internal/fileflow/imageflow"
+	"autolife/backend/internal/fileflow/officeflow"
 	"autolife/backend/internal/fileflow/pdfflow"
+	"autolife/backend/internal/fileflow/processing"
+	"autolife/backend/internal/fileflow/tableflow"
+	"autolife/backend/internal/htmlproto"
 	"autolife/backend/internal/platform/config"
 	"autolife/backend/internal/platform/database"
 	"autolife/backend/internal/platform/httpserver"
+	"autolife/backend/internal/tableproto"
 	"autolife/backend/internal/workflow"
 	workflowdb "autolife/backend/internal/workflow/postgres"
 	"autolife/backend/internal/workflow/workflowhttp"
@@ -77,10 +82,13 @@ func Start(service, databaseKey string) int {
 			return 1
 		}
 	}
+	if service == "api" && files != nil && imageLauncher != nil {
+		files.Previewer = imageLauncher
+	}
 	if imageObjects == nil || imageLauncher == nil {
 		err = imageflow.Register(registry, nil, nil)
 	} else {
-		err = imageflow.Register(registry, imageObjects, imageLauncher)
+		err = imageflow.RegisterFormats(registry, imageObjects, imageLauncher, os.Getenv("AUTOLIFE_SVG_ENABLED") == "true")
 	}
 	if err != nil {
 		logger.Error("cannot register image actions")
@@ -97,10 +105,61 @@ func Start(service, databaseKey string) int {
 	if imageObjects == nil || pdfLauncher == nil {
 		err = pdfflow.Register(registry, nil, nil)
 	} else {
-		err = pdfflow.Register(registry, imageObjects, pdfLauncher)
+		err = pdfflow.RegisterOperations(registry, imageObjects, pdfLauncher, os.Getenv("AUTOLIFE_PDF_RASTER_ENABLED") == "true")
 	}
 	if err != nil {
 		logger.Error("cannot register PDF actions")
+		return 1
+	}
+	var officeLauncher *processing.Launcher
+	if socket := os.Getenv("AUTOLIFE_OFFICE_LAUNCHER_SOCKET"); socket != "" {
+		officeLauncher, err = processing.NewLauncher(socket, officeflow.Profile)
+		if err != nil {
+			logger.Error("invalid Office launcher configuration")
+			return 1
+		}
+	}
+	if imageObjects == nil || officeLauncher == nil {
+		err = officeflow.Register(registry, nil, nil)
+	} else {
+		err = officeflow.Register(registry, imageObjects, officeLauncher)
+	}
+	if err != nil {
+		logger.Error("cannot register Office actions")
+		return 1
+	}
+	var tableLauncher *processing.Launcher
+	if socket := os.Getenv("AUTOLIFE_TABLE_LAUNCHER_SOCKET"); socket != "" {
+		tableLauncher, err = processing.NewLauncher(socket, tableproto.ConvertProfile)
+		if err != nil {
+			logger.Error("invalid table launcher configuration")
+			return 1
+		}
+	}
+	if imageObjects == nil || tableLauncher == nil {
+		err = tableflow.Register(registry, nil, nil)
+	} else {
+		err = tableflow.Register(registry, imageObjects, tableLauncher)
+	}
+	if err != nil {
+		logger.Error("cannot register table action")
+		return 1
+	}
+	var htmlLauncher *processing.Launcher
+	if socket := os.Getenv("AUTOLIFE_HTML_LAUNCHER_SOCKET"); socket != "" {
+		htmlLauncher, err = processing.NewLauncher(socket, htmlproto.ConvertProfile)
+		if err != nil {
+			logger.Error("invalid HTML launcher configuration")
+			return 1
+		}
+	}
+	if imageObjects == nil || htmlLauncher == nil {
+		err = officeflow.RegisterHTML(registry, nil, nil)
+	} else {
+		err = officeflow.RegisterHTML(registry, imageObjects, htmlLauncher)
+	}
+	if err != nil {
+		logger.Error("cannot register HTML action")
 		return 1
 	}
 	if service == "api" {
