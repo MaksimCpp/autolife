@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,7 +54,7 @@ func ReportFileUsage(ctx context.Context, u FileUsage) error {
 func emitFileUsage(ctx context.Context, tx pgx.Tx, e Execution, ordinal *int, outcome string) error {
 	_, err := tx.Exec(ctx, `INSERT INTO platform.outbox_events(type,logical_key,payload)
  SELECT 'file.action_completed',$1::uuid::text||':'||a.ordinal::text,
-  a.file_usage || jsonb_build_object('execution_id',$1::uuid::text,'owner_id',$2::uuid::text,
+  a.file_usage || jsonb_build_object('schema_version',1,'execution_id',$1::uuid::text,'owner_id',$2::uuid::text,
    'step_id',s.step_key,'action_type',s.action_type,'action_version',s.action_version,
    'duration_ms',greatest(0,(extract(epoch FROM (coalesce(a.ended_at,clock_timestamp())-s.started_at))*1000)::bigint),
    'outcome',CASE WHEN s.status='succeeded' THEN 'succeeded' ELSE $4::text END)
@@ -62,5 +63,65 @@ func emitFileUsage(ctx context.Context, tx pgx.Tx, e Execution, ordinal *int, ou
   AND a.number=(SELECT max(b.number) FROM platform.execution_attempts b WHERE b.execution_id=a.execution_id AND b.ordinal=a.ordinal)
   AND a.file_usage IS NOT NULL
  ON CONFLICT DO NOTHING`, e.ID, e.OwnerID, ordinal, outcome)
+	return err
+}
+
+// ReportSandboxUsage records the launcher sample under the current attempt fence.
+func ReportSandboxUsage(ctx context.Context, cpuNS, memoryBytes uint64) error {
+	a, ok := ctx.Value(attemptKey{}).(attemptScope)
+	if !ok {
+		return ErrLease
+	}
+	if cpuNS > uint64((15*time.Minute).Nanoseconds()) || memoryBytes == 0 || memoryBytes > 2<<30 {
+		return ErrInputs
+	}
+	report, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	tag, err := a.store.Pool.Exec(report, `UPDATE platform.execution_attempts x
+ SET sampled_jobs=sampled_jobs+1, cpu_ns=coalesce(cpu_ns,0)+$5, peak_memory_bytes=greatest(peak_memory_bytes,$6)
+ FROM platform.executions e WHERE e.id=x.execution_id AND x.execution_id=$1 AND x.ordinal=$2 AND x.number=$3
+ AND x.fence=$4 AND e.fence=$4 AND x.state='running' AND e.terminal_at IS NULL`,
+		a.execution.ID, a.ordinal, a.number, a.execution.Fence, int64(cpuNS), int64(memoryBytes))
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrLease
+	}
+	return err
+}
+
+type storageUsage struct {
+	gets, puts, bytesRead, bytesWritten atomic.Int64
+}
+
+// ReportObjectTransfer tracks successful object requests and application bytes.
+// Non-execution uploads, previews and presigned client downloads are excluded.
+func ReportObjectTransfer(ctx context.Context, put bool, bytes int64) {
+	a, ok := ctx.Value(attemptKey{}).(attemptScope)
+	if !ok || a.storage == nil || bytes < 0 || bytes > 100_000_000 {
+		return
+	}
+	if put {
+		a.storage.puts.Add(1)
+		a.storage.bytesWritten.Add(bytes)
+		return
+	}
+	a.storage.gets.Add(1)
+	a.storage.bytesRead.Add(bytes)
+}
+
+func (a attemptScope) persistStorageUsage(ctx context.Context) error {
+	gets, puts := a.storage.gets.Load(), a.storage.puts.Load()
+	if gets == 0 && puts == 0 {
+		return nil
+	}
+	report, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	tag, err := a.store.Pool.Exec(report, `UPDATE platform.execution_attempts x
+ SET storage_gets=$5,storage_puts=$6,storage_read_bytes=$7,storage_write_bytes=$8
+ FROM platform.executions e WHERE e.id=x.execution_id AND x.execution_id=$1 AND x.ordinal=$2 AND x.number=$3
+ AND x.fence=$4 AND e.fence=$4 AND x.state='running' AND e.terminal_at IS NULL`,
+		a.execution.ID, a.ordinal, a.number, a.execution.Fence, gets, puts, a.storage.bytesRead.Load(), a.storage.bytesWritten.Load())
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrLease
+	}
 	return err
 }

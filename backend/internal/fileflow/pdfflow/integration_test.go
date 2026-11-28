@@ -24,13 +24,19 @@ import (
 	"autolife/backend/internal/execution"
 	"autolife/backend/internal/fileflow"
 	"autolife/backend/internal/fileflow/imageflow"
+	"autolife/backend/internal/fileflow/officeflow"
+	"autolife/backend/internal/fileflow/tableflow"
+	"autolife/backend/internal/tableproto"
 	"autolife/backend/internal/workflow"
 	workflowdb "autolife/backend/internal/workflow/postgres"
 	workflowhttp "autolife/backend/internal/workflow/workflowhttp"
+	"errors"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivermigrate"
+	"github.com/xuri/excelize/v2"
+	"image/jpeg"
 )
 
 type fixtureLauncher struct {
@@ -61,6 +67,7 @@ func (l *fixtureLauncher) Transform(ctx context.Context, _ string, header []byte
 		}
 		return nil, 0, err
 	}
+	_ = execution.ReportSandboxUsage(ctx, 20_000_000, 32<<20)
 	return io.NopCloser(bytes.NewReader(raw)), int64(len(raw)), nil
 }
 
@@ -141,12 +148,27 @@ func TestPDFWorkflowAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := workflow.NewRegistry()
+	expanded := os.Getenv("AUTOLIFE_TABLE_TEST_TAG") != ""
 	native := &fixtureLauncher{image: pdfTag, memory: "768m", disk: "768m", entered: make(chan struct{}, 1)}
-	if err := Register(reg, objects, native); err != nil {
+	if err := RegisterOperations(reg, objects, native, expanded); err != nil {
 		t.Fatal(err)
 	}
-	if err := imageflow.Register(reg, objects, &fixtureLauncher{image: imageTag, memory: "512m", disk: "384m"}); err != nil {
+	imageNative := &fixtureLauncher{image: imageTag, memory: "512m", disk: "384m"}
+	if err := imageflow.RegisterFormats(reg, objects, imageNative, expanded); err != nil {
 		t.Fatal(err)
+	}
+	officeTag := os.Getenv("AUTOLIFE_OFFICE_TEST_TAG")
+	var officeNative *fixtureLauncher
+	if officeTag != "" {
+		officeNative = &fixtureLauncher{image: officeTag, memory: "768m", disk: "384m"}
+		if err := officeflow.Register(reg, objects, officeNative); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if expanded {
+		if err := tableflow.Register(reg, objects, &fixtureLauncher{image: os.Getenv("AUTOLIFE_TABLE_TEST_TAG"), memory: "512m", disk: "384m"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	execAPI, err := execution.New(api, reg, false)
 	if err != nil {
@@ -164,7 +186,7 @@ func TestPDFWorkflowAPI(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	files := &fileflow.Service{Store: fileflow.NewStore(api), Objects: objects}
+	files := &fileflow.Service{Store: fileflow.NewStore(api), Objects: objects, Previewer: imageNative, Slots: make(chan struct{}, 1)}
 	route := chi.NewRouter()
 	auth.Routes(route)
 	(workflowhttp.API{Store: workflowdb.New(api, reg), Registry: reg}).Routes(route, auth.RequireSession, auth.ProtectSession, accounts.SessionOwner)
@@ -295,6 +317,199 @@ func TestPDFWorkflowAPI(t *testing.T) {
 	if len(failed.Outputs) != 0 || failed.Steps[1].Status != "skipped" {
 		t.Fatal("partial result exposed")
 	}
+	if officeNative != nil {
+		t.Run("office_text_batch", func(t *testing.T) {
+			protected := excelize.NewFile()
+			defer protected.Close()
+			var encrypted bytes.Buffer
+			if err := protected.Write(&encrypted, excelize.Options{Password: "office-fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			_, _, protectedErr := officeNative.Transform(ctx, "", []byte{'I'}, bytes.NewReader(encrypted.Bytes()), int64(encrypted.Len()))
+			if !errors.Is(protectedErr, execution.ErrInputs) {
+				t.Fatalf("protected workbook accepted or invalid runtime: %v", protectedErr)
+			}
+			files.StorageBytes, files.ConcurrentUploads = 1_000_000_000, 2
+			files.Inspector = officeFixtureInspector{officeNative}
+			var inputIDs []string
+			for _, text := range []string{"Первый файл", "Второй файл"} {
+				file, err := files.Upload(ctx, owner, "source.txt", "text/plain", strings.NewReader(text), func() error { return nil })
+				if err != nil || file.MIME == nil || *file.MIME != "text/plain" {
+					t.Fatalf("Office upload: %v (%+v)", err, file)
+				}
+				inputIDs = append(inputIDs, file.ID)
+			}
+			officeID := fixture(`[
+ {"id":"convert","action_type":"file.text.to_pdf","action_version":1,"config":{"page_size":"Letter","orientation":"landscape","margin_mm":15},"input_bindings":{"files":{"source":"trigger","output":"files"}}},
+ {"id":"merge","action_type":"file.pdf.merge","action_version":1,"input_bindings":{"pdfs":{"source":"convert","output":"files"}}}]`)
+			id := start(officeID, "office-batch", inputIDs)
+			done := wait(id, execution.Succeeded)
+			var out []string
+			if err := json.Unmarshal(done.Outputs["convert"]["files"], &out); err != nil || len(out) != 2 || done.Outputs["merge"]["pdf"] == nil {
+				t.Fatalf("office results: %v (%v)", err, done.Outputs)
+			}
+			var reports int
+			if err := admin.QueryRow(ctx, `SELECT count(*) FROM platform.outbox_events WHERE type='file.action_completed'
+ AND payload->>'execution_id'=$1 AND payload->>'input_format'='txt' AND payload->>'output_count'='2'`, id).Scan(&reports); err != nil || reports != 1 {
+				t.Fatalf("Office outbox: %d %v", reports, err)
+			}
+			invalid := seed("text/plain", []byte{0})
+			failed := wait(start(officeID, "office-invalid", []string{inputIDs[0], invalid}), execution.Failed)
+			if len(failed.Outputs) != 0 || failed.Steps[1].Status != "skipped" {
+				t.Fatal("office batch exposed a partial output")
+			}
+		})
+	}
+	if expanded {
+		t.Run("additional_formats_and_quick", func(t *testing.T) {
+			quick := func(action, key string, cfg map[string]any, input []string, expected int) string {
+				t.Helper()
+				var r struct{ ID string }
+				request("POST", "/api/v1/executions", key, map[string]any{"action_type": action, "action_version": 1,
+					"config": cfg, "files": input}, expected, &r)
+				return r.ID
+			}
+			ids := func(run execution.Details, step string, count int) []string {
+				t.Helper()
+				var list []string
+				if err := json.Unmarshal(run.Outputs[step]["files"], &list); err != nil || len(list) != count {
+					t.Fatalf("unexpected refs: %v %v", list, err)
+				}
+				return list
+			}
+			rasterConfig := map[string]any{"format": "png", "dpi": 72, "alpha": true, "ranges": []string{"2", "1"}}
+			rasterID := quick("file.pdf.rasterize", "quick-raster", rasterConfig, []string{pdfA}, 202)
+			if repeated := quick("file.pdf.rasterize", "quick-raster", rasterConfig, []string{pdfA}, 202); repeated != rasterID {
+				t.Fatal("idempotent quick run changed ID")
+			}
+			quick("file.pdf.rasterize", "quick-raster", rasterConfig, []string{pdfB}, 409)
+			quick("file.pdf.rasterize", "invalid-pair", rasterConfig, []string{pngID}, 422)
+			raster := wait(rasterID, execution.Succeeded)
+			if raster.WorkflowID != nil || raster.QuickSnapshotID == nil {
+				t.Fatal("wrong quick snapshot source")
+			}
+			pages := ids(raster, "convert", 2)
+			var positions []struct {
+				Input int `json:"input_index"`
+				Page  int
+			}
+			if raw := raster.Outputs["convert"]["pages"]; json.Unmarshal(raw, &positions) != nil ||
+				len(positions) != 2 || positions[0].Input != 1 || positions[1].Input != 1 || positions[0].Page != 1 || positions[1].Page != 2 {
+				t.Fatalf("wrong PDF page provenance: %s", raw)
+			}
+			for index, page := range pages {
+				f, err := files.Store.GetReady(ctx, owner, page)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reader, _, err := objects.Open(ctx, f.ObjectKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raster, err := png.Decode(reader)
+				reader.Close()
+				if err != nil || raster.Bounds().Dx() != 100+20*index || raster.Bounds().Dy() != 300 {
+					t.Fatalf("raster bounds/order: %v", err)
+				}
+				_, _, _, alpha := raster.At(0, 0).RGBA()
+				if alpha != 0 {
+					t.Fatal("transparent PDF background lost")
+				}
+			}
+			req := httptest.NewRequest("GET", "/api/v1/files/"+pages[0]+"/preview", nil)
+			req.AddCookie(&http.Cookie{Name: "autolife-session", Value: token})
+			response := httptest.NewRecorder()
+			route.ServeHTTP(response, req)
+			preview, err := jpeg.Decode(response.Body)
+			if err != nil || response.Code != 200 || response.Header().Get("Cache-Control") != "private, no-store" || preview.Bounds().Dx() != 100 {
+				t.Fatalf("invalid preview: %d %v", response.Code, err)
+			}
+			var other string
+			if err := admin.QueryRow(ctx, `INSERT INTO platform.users(normalized_email,password_hash,email_verified_at)
+ VALUES(gen_random_uuid()::text||'@quick.example.test','fixture',now()) RETURNING id::text`).Scan(&other); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DELETE FROM platform.users WHERE id=$1", other) })
+			if _, err := execAPI.Details(ctx, other, rasterID); !errors.Is(err, workflow.ErrNotFound) {
+				t.Fatalf("quick execution crossed owners: %v", err)
+			}
+			if _, err := files.Store.GetReady(ctx, other, pages[0]); !errors.Is(err, fileflow.ErrNotFound) {
+				t.Fatalf("quick output crossed owners: %v", err)
+			}
+			badRange := map[string]any{"format": "png", "ranges": []string{"3"}}
+			if failed := wait(quick("file.pdf.rasterize", "invalid-range", badRange, []string{pdfA}, 202), execution.Failed); len(failed.Outputs) != 0 {
+				t.Fatal("invalid page range was published")
+			}
+			huge := seed("application/pdf", makePDF(10000))
+			if failed := wait(quick("file.pdf.rasterize", "pixel-limit", map[string]any{"format": "png", "dpi": 300}, []string{huge}, 202), execution.Failed); len(failed.Outputs) != 0 {
+				t.Fatal("oversized raster was published")
+			}
+			var retry struct{ ID string }
+			request("POST", "/api/v1/executions/"+rasterID+"/retry", "quick-retry", map[string]any{}, 202, &retry)
+			if rerun := wait(retry.ID, execution.Succeeded); rerun.QuickSnapshotID == nil || *rerun.QuickSnapshotID != *raster.QuickSnapshotID {
+				t.Fatal("retry changed immutable snapshot")
+			}
+			rasterChain := fixture(`[
+ {"id":"render","action_type":"file.pdf.rasterize","action_version":1,"config":{"format":"png","dpi":72},"input_bindings":{"pdfs":{"source":"trigger","output":"files"}}},
+ {"id":"compress","action_type":"file.image.compress","action_version":1,"input_bindings":{"files":{"source":"render","output":"files"}}}]`)
+			ids(wait(start(rasterChain, "raster-chain", []string{pdfA}), execution.Succeeded), "compress", 2)
+			svg := seed("image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><rect width="12" height="12" fill="#ff0000"/></svg>`))
+			rasterResult := func(id string) []byte {
+				t.Helper()
+				f, err := files.Store.GetReady(ctx, owner, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reader, _, err := objects.Open(ctx, f.ObjectKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+				data, err := io.ReadAll(reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			img := wait(quick("file.image.convert", "svg-png", map[string]any{"format": "png"}, []string{svg}, 202), execution.Succeeded)
+			pngImage, err := png.Decode(bytes.NewReader(rasterResult(ids(img, "convert", 1)[0])))
+			if err != nil || pngImage.Bounds().Dx() != 24 || pngImage.Bounds().Dy() != 12 {
+				t.Fatalf("SVG viewBox: %v", err)
+			}
+			if _, _, _, alpha := pngImage.At(23, 6).RGBA(); alpha != 0 {
+				t.Fatal("SVG PNG lost transparency")
+			}
+			jpg := wait(quick("file.image.convert", "svg-jpeg", map[string]any{"format": "jpeg", "background": "#0022dd"}, []string{svg}, 202), execution.Succeeded)
+			jpegImage, err := jpeg.Decode(bytes.NewReader(rasterResult(ids(jpg, "convert", 1)[0])))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, g, b, _ := jpegImage.At(23, 6).RGBA()
+			if b < 45_000 || r > 10_000 || g > 20_000 {
+				t.Fatalf("SVG JPEG background: %d %d %d", r, g, b)
+			}
+			rotate := seed("application/pdf", makePDF(-100))
+			rotated := wait(quick("file.pdf.rasterize", "pdf-rotated", map[string]any{"format": "jpeg", "dpi": 72}, []string{rotate}, 202), execution.Succeeded)
+			jpegImage, err = jpeg.Decode(bytes.NewReader(rasterResult(ids(rotated, "convert", 1)[0])))
+			if err != nil || jpegImage.Bounds().Dx() != 300 || jpegImage.Bounds().Dy() != 100 {
+				t.Fatalf("PDF rotated geometry: %v", err)
+			}
+			quick("file.image.convert", "svg-webp", map[string]any{"format": "webp"}, []string{svg}, 422)
+			csv := seed(tableproto.CSV, []byte("001;Привет;=1+1\n"))
+			book := ids(wait(quick("file.table.convert", "csv-xlsx", map[string]any{"format": "xlsx", "delimiter": ";"}, []string{csv}, 202), execution.Succeeded), "convert", 1)
+			table := wait(quick("file.table.convert", "xlsx-csv", map[string]any{"format": "csv", "delimiter": ";"}, book, 202), execution.Succeeded)
+			if string(table.Outputs["convert"]["escaped_values"]) != "1" {
+				t.Fatal("formula-safe CSV warning missing")
+			}
+			ids(table, "convert", 1)
+			var completed, attempts int
+			if err := admin.QueryRow(ctx, `SELECT count(*) FILTER(WHERE type='file.action_completed'),
+ count(*) FILTER(WHERE type='file.action_attempted' AND payload->>'sampled_jobs'='1' AND payload->>'cpu_ns'='20000000' AND payload->>'storage_gets'='1' AND payload->>'storage_puts'='2') FROM platform.outbox_events
+ WHERE payload->>'execution_id'=$1 AND payload->>'schema_version'='1'`, rasterID).Scan(&completed, &attempts); err != nil || completed != 1 || attempts != 1 {
+				t.Fatalf("versioned outcome/attempt: %d/%d %v", completed, attempts, err)
+			}
+		})
+	}
 	native.block.Store(true)
 	cancelID := start(workflowID, "cancel", []string{pdfA, pdfB})
 	select {
@@ -306,6 +521,24 @@ func TestPDFWorkflowAPI(t *testing.T) {
 	if result := wait(cancelID, execution.Cancelled); len(result.Outputs) != 0 {
 		t.Fatal("cancelled outputs exposed")
 	}
+}
+
+type officeFixtureInspector struct{ native *fixtureLauncher }
+
+func (i officeFixtureInspector) Inspect(ctx context.Context, id, profile string, body io.Reader, size int64) (string, error) {
+	if profile != "office" {
+		return "", fileflow.ErrInvalid
+	}
+	result, _, err := i.native.Transform(ctx, id, []byte{'I'}, body, size)
+	if err != nil {
+		return "", err
+	}
+	defer result.Close()
+	var metadata struct{ MIME string }
+	if err := json.NewDecoder(result).Decode(&metadata); err != nil {
+		return "", err
+	}
+	return metadata.MIME, nil
 }
 
 func makePDF(widths ...int) []byte {
@@ -325,7 +558,11 @@ func makePDF(widths ...int) []byte {
 	}
 	add("<< /Type /Pages /Kids [%s] /Count %d >>", kids.String(), len(widths))
 	for _, w := range widths {
-		add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d 300] /Resources << >> >>", w)
+		rotate := 0
+		if w < 0 {
+			w, rotate = -w, 90
+		}
+		add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d 300] /Rotate %d /Resources << >> >>", w, rotate)
 	}
 	xref := b.Len()
 	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(offsets))

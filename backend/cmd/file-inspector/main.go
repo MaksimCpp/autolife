@@ -13,6 +13,7 @@ import (
 
 	"autolife/backend/internal/pdfcheck"
 	"autolife/backend/internal/sandbox"
+	"autolife/backend/internal/svgcheck"
 )
 
 func main() {
@@ -39,7 +40,19 @@ func inspect(profile string, src io.Reader) (string, error) {
 	}
 	header = header[:n]
 	mime := http.DetectContentType(header)
-	ext := map[string]string{"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf"}[mime]
+	body := io.MultiReader(bytes.NewReader(header), src)
+	if profile == "image" && mime != "image/jpeg" && mime != "image/png" && mime != "image/webp" {
+		data, err := io.ReadAll(io.LimitReader(body, svgcheck.MaxBytes+1))
+		if err != nil {
+			return "", err
+		}
+		if len(data) > svgcheck.MaxBytes || svgcheck.Validate(bytes.NewReader(data)) != nil {
+			return "", nil
+		}
+		body = bytes.NewReader(data)
+		mime = svgcheck.MIME
+	}
+	ext := map[string]string{"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf", svgcheck.MIME: "svg"}[mime]
 	if ext == "" || (profile == "pdf" && ext != "pdf") || (profile == "image" && ext == "pdf") {
 		return "", nil
 	}
@@ -49,7 +62,7 @@ func inspect(profile string, src io.Reader) (string, error) {
 		return "", err
 	}
 	defer os.Remove(path)
-	count, err := io.Copy(f, io.LimitReader(io.MultiReader(bytes.NewReader(header), src), sandbox.MaxInputBytes+1))
+	count, err := io.Copy(f, io.LimitReader(body, sandbox.MaxInputBytes+1))
 	closeErr := f.Close()
 	if err != nil {
 		return "", err
@@ -67,7 +80,7 @@ func inspect(profile string, src io.Reader) (string, error) {
 }
 
 func validImage(path string) bool {
-	expected := map[string]string{".jpg": "jpegload", ".png": "pngload", ".webp": "webpload"}[filepath.Ext(path)]
+	expected := map[string]string{".jpg": "jpegload", ".png": "pngload", ".webp": "webpload", ".svg": "svgload"}[filepath.Ext(path)]
 	loader, err := exec.Command("vipsheader", "-f", "vips-loader", path).Output()
 	if err != nil || strings.TrimSpace(string(loader)) != expected {
 		return false
@@ -87,6 +100,9 @@ func validImage(path string) bool {
 	}
 	if dimensions[0]*dimensions[1] > 40_000_000 {
 		return false
+	}
+	if expected == "svgload" {
+		return exec.Command("vips", "avg", path+"[unlimited=false]").Run() == nil
 	}
 	// avg forces libvips to decode the entire raster sequentially.
 	return exec.Command("vips", "avg", path+"[access=sequential,fail-on=warning]").Run() == nil

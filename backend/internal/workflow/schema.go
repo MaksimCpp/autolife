@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -193,7 +194,8 @@ func checkValues(ctx context.Context, lookup FileLookup, fields Fields, values V
 		return []Problem{{"LIMIT_EXCEEDED", path, step}}, nil
 	}
 	var problems []Problem
-	for name, field := range fields {
+	for _, name := range slices.Sorted(maps.Keys(fields)) {
+		field := fields[name]
 		value, ok := values[name]
 		if !ok && field.Optional {
 			continue

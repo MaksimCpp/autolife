@@ -1,6 +1,9 @@
 package sandbox
 
 import (
+	"autolife/backend/internal/htmlproto"
+	"autolife/backend/internal/officeproto"
+	"autolife/backend/internal/tableproto"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -39,6 +42,9 @@ var (
 type Config struct {
 	DockerPath, DockerSocket, DockerConfigDir                                 string
 	Instance, ImageProfile, PDFProfile, TransformProfile, PDFTransformProfile string
+	OfficeProfile, OfficeTransformProfile                                     string
+	TableProfile                                                              string
+	HTMLProfile                                                               string
 }
 
 type profile struct {
@@ -50,11 +56,16 @@ type profile struct {
 type command func(context.Context, io.Reader, int, ...string) ([]byte, error)
 
 type Launcher struct {
-	instance   string
-	profiles   map[string]profile
-	run        command
-	slots      chan struct{}
-	transforms transformState
+	instance    string
+	profiles    map[string]profile
+	run         command
+	slots       chan struct{}
+	officeSlots chan struct{}
+	tableSlots  chan struct{}
+	transforms  transformState
+	htmlSlots   chan struct{}
+	htmlReady   bool
+	sample      sampler
 }
 
 func New(config Config) (*Launcher, error) {
@@ -75,11 +86,12 @@ func New(config Config) (*Launcher, error) {
 	launcher := &Launcher{
 		instance: config.Instance,
 		run:      run,
+		sample:   statsSampler(config.DockerSocket),
 		profiles: map[string]profile{
 			"image": {image: config.ImageProfile, memory: "512m", timeout: 20 * time.Second},
 			"pdf":   {image: config.PDFProfile, memory: "384m", timeout: 25 * time.Second},
 		},
-		slots: make(chan struct{}, 2),
+		slots: make(chan struct{}, 2), officeSlots: make(chan struct{}, 1), tableSlots: make(chan struct{}, 1), htmlSlots: make(chan struct{}, 1),
 	}
 	if config.PDFTransformProfile != "" {
 		launcher.profiles["pdf-transform"] = profile{image: config.PDFTransformProfile, memory: "768m", timeout: 90 * time.Second}
@@ -87,7 +99,40 @@ func New(config Config) (*Launcher, error) {
 	if config.TransformProfile != "" {
 		launcher.profiles["image-transform"] = profile{image: config.TransformProfile, memory: "512m", timeout: 30 * time.Second}
 	}
-	if config.TransformProfile != "" || config.PDFTransformProfile != "" {
+	for kind, image := range map[string]string{"office": config.OfficeProfile, "office-transform": config.OfficeTransformProfile} {
+		if image == "" {
+			continue
+		}
+		if !imageReference.MatchString(image) || slices.Contains([]string{config.ImageProfile, config.PDFProfile, config.TransformProfile, config.PDFTransformProfile}, image) {
+			return nil, errors.New("office profiles require digest-pinned office images")
+		}
+		launcher.profiles[kind] = profile{image: image, memory: "768m", timeout: 40 * time.Second}
+	}
+	if config.TableProfile != "" {
+		if !imageReference.MatchString(config.TableProfile) {
+			return nil, errors.New("table profile requires a digest-pinned image")
+		}
+		for _, p := range launcher.profiles {
+			if p.image == config.TableProfile {
+				return nil, errors.New("table profile requires a distinct image")
+			}
+		}
+		p := profile{image: config.TableProfile, memory: "512m", timeout: 35 * time.Second}
+		launcher.profiles[tableproto.InspectProfile], launcher.profiles[tableproto.ConvertProfile] = p, p
+	}
+	if config.HTMLProfile != "" {
+		if !imageReference.MatchString(config.HTMLProfile) {
+			return nil, errors.New("HTML profile requires a digest-pinned image")
+		}
+		for _, p := range launcher.profiles {
+			if p.image == config.HTMLProfile {
+				return nil, errors.New("HTML profile requires a distinct image")
+			}
+		}
+		p := profile{image: config.HTMLProfile, memory: "1024m", timeout: 65 * time.Second}
+		launcher.profiles[htmlproto.InspectProfile], launcher.profiles[htmlproto.ConvertProfile] = p, p
+	}
+	if config.TransformProfile != "" || config.PDFTransformProfile != "" || config.OfficeTransformProfile != "" || config.TableProfile != "" || config.HTMLProfile != "" {
 		launcher.transforms = transformState{dir: filepath.Join(config.DockerConfigDir, "autolife-stopped-"+config.Instance), active: make(map[string]*transformJob), mu: new(sync.Mutex)}
 	}
 	return launcher, nil
@@ -191,7 +236,16 @@ func (l *Launcher) Prepare(ctx context.Context) error {
 	if err := l.prepareTransforms(); err != nil {
 		return err
 	}
-	return l.preflight(ctx)
+	if err := l.preflight(ctx); err != nil {
+		return err
+	}
+	if p, ok := l.profiles[htmlproto.ConvertProfile]; ok {
+		fixture := "<html><body>AutoLife sandbox probe</body></html>"
+		request := append(htmlproto.Layout{Margin: 20}.Header(), fixture...)
+		data, err := l.execute(ctx, "00000000-0000-4000-8000-000000000000", p, bytes.NewReader(request), int64(len(request)), htmlproto.MaxOutput)
+		l.htmlReady = err == nil && bytes.HasPrefix(data, []byte("%PDF-"))
+	}
+	return nil
 }
 
 func (l *Launcher) Accepts(id, kind string) bool {
@@ -200,6 +254,17 @@ func (l *Launcher) Accepts(id, kind string) bool {
 }
 
 func (l *Launcher) settings(p profile) (string, string) {
+	if h, ok := l.profiles[htmlproto.ConvertProfile]; ok && p.image == h.image {
+		return "/usr/local/bin/autolife-html", "rw,noexec,nosuid,nodev,size=512m,mode=1777"
+	}
+	if t, ok := l.profiles[tableproto.ConvertProfile]; ok && p.image == t.image {
+		return "/usr/local/bin/autolife-table", "rw,noexec,nosuid,nodev,size=384m,mode=1777"
+	}
+	for _, kind := range []string{"office", "office-transform"} {
+		if office, ok := l.profiles[kind]; ok && p.image == office.image {
+			return "/usr/local/bin/autolife-office", "rw,noexec,nosuid,nodev,size=384m,mode=1777"
+		}
+	}
 	if transformed, ok := l.profiles["image-transform"]; ok && p.image == transformed.image {
 		return "/usr/local/bin/autolife-image", "rw,noexec,nosuid,nodev,size=384m,mode=1777"
 	}
@@ -280,8 +345,23 @@ func (l *Launcher) verifyContainer(ctx context.Context, name string, p profile, 
 }
 
 func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader, size int64) (output []byte, err error) {
-	if (kind != "image" && kind != "pdf") || !l.Accepts(id, kind) || size < 1 || size > MaxInputBytes || input == nil {
+	if (kind != "image" && kind != "pdf" && kind != "office" && kind != tableproto.InspectProfile && kind != htmlproto.InspectProfile) || !jobID.MatchString(id) || size < 1 || size > MaxInputBytes || input == nil || (kind == "office" && size > officeproto.MaxInput || kind == tableproto.InspectProfile && size > tableproto.MaxBytes || kind == htmlproto.InspectProfile && size > htmlproto.MaxInput) {
 		return nil, ErrRejected
+	}
+	if !l.Accepts(id, kind) || kind == htmlproto.InspectProfile && !l.htmlReady {
+		return nil, ErrUnavailable
+	}
+	if kind == "office" || kind == tableproto.InspectProfile || kind == htmlproto.InspectProfile {
+		framed := io.MultiReader(strings.NewReader("I"), input)
+		if closer, ok := input.(io.Closer); ok {
+			input = struct {
+				io.Reader
+				io.Closer
+			}{framed, closer}
+		} else {
+			input = framed
+		}
+		size++
 	}
 	data, err := l.execute(ctx, id, l.profiles[kind], input, size, MaxResultBytes)
 	if err != nil {
@@ -294,6 +374,26 @@ func (l *Launcher) Inspect(ctx context.Context, id, kind string, input io.Reader
 }
 
 func (l *Launcher) execute(ctx context.Context, id string, p profile, input io.Reader, size int64, outputLimit int) (output []byte, err error) {
+	entry, _ := l.settings(p)
+	var profileSlots chan struct{}
+	switch entry {
+	case "/usr/local/bin/autolife-office":
+		profileSlots = l.officeSlots
+	case "/usr/local/bin/autolife-table":
+		profileSlots = l.tableSlots
+	case "/usr/local/bin/autolife-html":
+		profileSlots = l.htmlSlots
+	}
+	if profileSlots != nil {
+		select {
+		case profileSlots <- struct{}{}:
+			defer func() { <-profileSlots }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, ErrSaturated
+		}
+	}
 	select {
 	case l.slots <- struct{}{}:
 		defer func() { <-l.slots }()
@@ -335,7 +435,12 @@ func (l *Launcher) execute(ctx context.Context, id string, p profile, input io.R
 		stopRead := context.AfterFunc(ctx, func() { _ = closer.Close() })
 		defer stopRead()
 	}
+	finishSampling := func() {}
+	if usage, ok := ctx.Value(usageKey{}).(*Usage); ok && l.sample != nil {
+		finishSampling = l.sample(ctx, name, usage)
+	}
 	data, err := l.run(ctx, limited, outputLimit, "start", "--attach", "--interactive", name)
+	finishSampling()
 	if ctx.Err() != nil {
 		return nil, ErrUnavailable
 	}

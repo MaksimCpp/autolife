@@ -144,6 +144,17 @@ func TestFileLifecycle(t *testing.T) {
 		t.Fatalf("broken multipart: %v", err)
 	}
 	cleanup()
+	service.Inspector = inspectFunc(func(_ context.Context, _ string, profile string, _ io.Reader, _ int64) (string, error) {
+		if profile != "office" {
+			t.Fatalf("Office inspection dispatched to %s", profile)
+		}
+		return "application/msword", nil
+	})
+	if _, err := service.Upload(ctx, owner, "fixture.doc", "application/msword", strings.NewReader("PK\x03\x04payload"), finish); !errors.Is(err, ErrInvalid) || objects.puts != 0 {
+		t.Fatalf("ZIP must not be published as an OLE document: %v", err)
+	}
+	cleanup()
+	service.Inspector = accepted
 	objects.failPut = true
 	if _, err := upload("image/png", 12, finish); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("storage failure: %v", err)

@@ -60,9 +60,24 @@ type Start struct {
 	Inputs           workflow.Values `json:"user_inputs,omitempty"`
 }
 
+type QuickStart struct {
+	ActionType    string          `json:"action_type"`
+	ActionVersion int             `json:"action_version"`
+	Config        workflow.Values `json:"config,omitempty"`
+	Files         []string        `json:"files"`
+}
+
+func (s *Store) StartQuick(ctx context.Context, owner, key string, input QuickStart) (Execution, error) {
+	if len(input.Files) < 1 || len(input.Files) > 50 || input.ActionType == "" || input.ActionVersion < 1 {
+		return Execution{}, ErrInputs
+	}
+	return s.admit(ctx, admission{owner: owner, key: key, mode: "quick", quick: &input, request: Start{Files: &input.Files}})
+}
+
 type admission struct {
 	workflowID, mode, retryID, owner, key string
 	request                               Start
+	quick                                 *QuickStart
 }
 
 func (s *Store) Start(ctx context.Context, owner, wid, key string, input Start, test bool) (Execution, error) {
@@ -76,11 +91,11 @@ func (s *Store) Retry(ctx context.Context, owner, id, key string, input Start) (
 	return s.admit(ctx, admission{retryID: id, mode: "retry", owner: owner, key: key, request: input})
 }
 
-const summaryColumns = "id::text,owner_id::text,workflow_id::text,version_id::text,snapshot_id::text,status,queued_at,start_deadline,started_at,run_deadline,terminal_at,error_code"
+const summaryColumns = "id::text,owner_id::text,workflow_id::text,version_id::text,snapshot_id::text,quick_snapshot_id::text,status,queued_at,start_deadline,started_at,run_deadline,terminal_at,error_code"
 const columns = summaryColumns + ",outputs,fence"
 
 func read(row pgx.Row, e *Execution) error {
-	err := row.Scan(&e.ID, &e.OwnerID, &e.WorkflowID, &e.VersionID, &e.SnapshotID, &e.Status, &e.QueuedAt, &e.StartDeadline, &e.StartedAt, &e.RunDeadline, &e.TerminalAt, &e.ErrorCode, &e.Outputs, &e.Fence)
+	err := row.Scan(&e.ID, &e.OwnerID, &e.WorkflowID, &e.VersionID, &e.SnapshotID, &e.QuickSnapshotID, &e.Status, &e.QueuedAt, &e.StartDeadline, &e.StartedAt, &e.RunDeadline, &e.TerminalAt, &e.ErrorCode, &e.Outputs, &e.Fence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflow.ErrNotFound
 	}
@@ -117,7 +132,11 @@ func event(ctx context.Context, tx pgx.Tx, e Execution, kind, key, code string, 
 }
 
 func hashRequest(a admission) ([32]byte, error) {
-	raw, err := json.Marshal(a.request)
+	var req any = a.request
+	if a.quick != nil {
+		req = a.quick
+	}
+	raw, err := json.Marshal(req)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -133,7 +152,7 @@ func hashRequest(a admission) ([32]byte, error) {
 
 func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 	var result Execution
-	if !workflow.ValidID(a.owner) || (a.mode == "retry" && !workflow.ValidID(a.retryID)) || (a.mode != "retry" && !workflow.ValidID(a.workflowID)) {
+	if !workflow.ValidID(a.owner) || (a.mode == "retry" && !workflow.ValidID(a.retryID)) || (a.mode != "retry" && a.mode != "quick" && !workflow.ValidID(a.workflowID)) {
 		return result, workflow.ErrNotFound
 	}
 	hash, err := hashRequest(a)
@@ -163,14 +182,16 @@ func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 			return err
 		}
 
-		wid := a.workflowID
-		var version, snapshot *string
+		var wid, version, snapshot, quickSnapshot *string
+		if a.workflowID != "" {
+			wid = &a.workflowID
+		}
 		trigger := workflow.Values{"files": json.RawMessage("[]")}
 		user := workflow.Values{}
 		if a.mode == "retry" {
 			var prior State
-			err = tx.QueryRow(ctx, `SELECT workflow_id::text,version_id::text,snapshot_id::text,trigger_values,user_inputs,status
-    FROM platform.executions WHERE id=$1 AND owner_id=$2`, a.retryID, a.owner).Scan(&wid, &version, &snapshot, &trigger, &user, &prior)
+			err = tx.QueryRow(ctx, `SELECT workflow_id::text,version_id::text,snapshot_id::text,quick_snapshot_id::text,trigger_values,user_inputs,status
+    FROM platform.executions WHERE id=$1 AND owner_id=$2`, a.retryID, a.owner).Scan(&wid, &version, &snapshot, &quickSnapshot, &trigger, &user, &prior)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return workflow.ErrNotFound
 			}
@@ -195,19 +216,29 @@ func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 		}
 		var status string
 		var active *string
-		err = tx.QueryRow(ctx, `SELECT status,active_version_id::text FROM platform.workflows
+		if wid != nil {
+			err = tx.QueryRow(ctx, `SELECT status,active_version_id::text FROM platform.workflows
    WHERE owner_id=$1 AND id=$2 FOR UPDATE`, a.owner, wid).Scan(&status, &active)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return workflow.ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		if status == "archived" {
-			return workflow.ErrArchived
+			if errors.Is(err, pgx.ErrNoRows) {
+				return workflow.ErrNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if status == "archived" {
+				return workflow.ErrArchived
+			}
 		}
 		var raw json.RawMessage
 		switch {
+		case a.mode == "quick":
+			def, buildErr := s.Registry.QuickDefinition(workflow.Key{Type: a.quick.ActionType, Version: a.quick.ActionVersion}, a.quick.Config)
+			if buildErr != nil {
+				return buildErr
+			}
+			raw, err = json.Marshal(def)
+		case quickSnapshot != nil:
+			err = tx.QueryRow(ctx, `SELECT definition FROM platform.quick_execution_snapshots WHERE owner_id=$1 AND id=$2`, a.owner, *quickSnapshot).Scan(&raw)
 		case a.mode == "test":
 			var revision int64
 			if err := tx.QueryRow(ctx, `SELECT definition,revision FROM platform.workflow_drafts WHERE owner_id=$1 AND workflow_id=$2`, a.owner, wid).Scan(&raw, &revision); err != nil {
@@ -240,6 +271,21 @@ func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 		def, err := workflow.DecodeDefinition(raw)
 		if err != nil {
 			return err
+		}
+		if a.mode == "quick" || quickSnapshot != nil {
+			var inputs []json.RawMessage
+			if json.Unmarshal(trigger["files"], &inputs) != nil || len(inputs) == 0 {
+				return ErrInputs
+			}
+			user = workflow.Values{}
+			if _, scalar := def.UserInputs["file"]; scalar {
+				if len(inputs) != 1 {
+					return ErrInputs
+				}
+				user["file"] = inputs[0]
+			} else {
+				user["files"] = trigger["files"]
+			}
 		}
 		refs := map[string]string{}
 		var bytesUsed int64
@@ -300,9 +346,17 @@ func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 			}
 			snapshot = &id
 		}
-		if err := read(tx.QueryRow(ctx, `INSERT INTO platform.executions(owner_id,workflow_id,version_id,snapshot_id,trigger_type,trigger_values,user_inputs,start_deadline)
-   VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+interval '30 minutes') RETURNING `+columns,
-			a.owner, wid, version, snapshot, def.Trigger.Type, trigger, user), &result); err != nil {
+		if a.mode == "quick" {
+			var id string
+			if err := tx.QueryRow(ctx, `INSERT INTO platform.quick_execution_snapshots(owner_id,schema_version,definition)
+ VALUES($1,$2,$3) RETURNING id::text`, a.owner, def.SchemaVersion, raw).Scan(&id); err != nil {
+				return err
+			}
+			quickSnapshot = &id
+		}
+		if err := read(tx.QueryRow(ctx, `INSERT INTO platform.executions(owner_id,workflow_id,version_id,snapshot_id,quick_snapshot_id,trigger_type,trigger_values,user_inputs,start_deadline)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+interval '30 minutes') RETURNING `+columns,
+			a.owner, wid, version, snapshot, quickSnapshot, def.Trigger.Type, trigger, user), &result); err != nil {
 			return err
 		}
 		ids := make([]string, 0, len(refs))
@@ -310,13 +364,25 @@ func (s *Store) admit(ctx context.Context, a admission) (Execution, error) {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
-		for _, id := range ids {
+		position := map[string]int{}
+		var ordered []string
+		_ = json.Unmarshal(trigger["files"], &ordered)
+		for index, id := range ordered {
+			if _, exists := position[id]; !exists {
+				position[id] = index
+			}
+		}
+		for index, id := range ids {
+			order, exists := position[id]
+			if !exists {
+				order = len(ordered) + index
+			}
 			var pin string
 			if err := tx.QueryRow(ctx, `INSERT INTO platform.file_pins(owner_id,file_id,expires_at) VALUES($1,$2,'infinity') RETURNING id::text`, a.owner, id).Scan(&pin); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO platform.execution_file_refs(owner_id,execution_id,file_id,live_file_id,pin_id,role)
-    VALUES($1,$2,$3,$3,$4,'input')`, a.owner, result.ID, id, pin); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.execution_file_refs(owner_id,execution_id,file_id,live_file_id,pin_id,role,position)
+    VALUES($1,$2,$3,$3,$4,'input',$5)`, a.owner, result.ID, id, pin, order); err != nil {
 				return err
 			}
 		}

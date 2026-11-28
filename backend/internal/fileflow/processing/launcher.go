@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"autolife/backend/internal/execution"
+	"autolife/backend/internal/htmlproto"
+	"autolife/backend/internal/officeproto"
 	"autolife/backend/internal/pdfproto"
 	"autolife/backend/internal/sandbox"
+	"autolife/backend/internal/tableproto"
 	"autolife/backend/internal/workflow"
 )
 
@@ -29,7 +32,7 @@ type Launcher struct {
 
 func NewLauncher(socket, kind string) (*Launcher, error) {
 	if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
-		return nil, errors.New("invalid image launcher socket")
+		return nil, errors.New("invalid processor launcher socket")
 	}
 	dialer := net.Dialer{Timeout: time.Second}
 	l := &Launcher{kind: kind}
@@ -37,6 +40,15 @@ func NewLauncher(socket, kind string) (*Launcher, error) {
 	switch kind {
 	case "image-transform":
 		l.maxRequest, l.maxResponse = sandbox.MaxInputBytes+sandbox.ImageHeaderBytes, sandbox.MaxInputBytes
+	case htmlproto.ConvertProfile:
+		l.maxRequest, l.maxResponse = htmlproto.MaxInput+htmlproto.HeaderBytes, htmlproto.MaxOutput
+		timeout = 90 * time.Second
+	case tableproto.ConvertProfile:
+		l.maxRequest, l.maxResponse = tableproto.MaxBytes+tableproto.HeaderBytes, tableproto.MaxBytes+8
+		timeout = 60 * time.Second
+	case "office-transform":
+		l.maxRequest, l.maxResponse = officeproto.MaxInput+officeproto.HeaderBytes, officeproto.MaxOutput
+		timeout = 65 * time.Second
 	case "pdf-transform":
 		l.maxRequest, l.maxResponse = pdfproto.MaxRequest, pdfproto.MaxResponse
 		timeout = 115 * time.Second
@@ -106,6 +118,11 @@ func (l *Launcher) Transform(ctx context.Context, id string, header []byte, sour
 	res, err := l.http.Do(req)
 	if err != nil {
 		return nil, 0, execution.ErrTemporary
+	}
+	cpu, cpuErr := strconv.ParseUint(res.Header.Get(sandbox.CPUHeader), 10, 64)
+	memory, memErr := strconv.ParseUint(res.Header.Get(sandbox.MemoryHeader), 10, 64)
+	if cpuErr == nil && memErr == nil {
+		_ = execution.ReportSandboxUsage(ctx, cpu, memory)
 	}
 	if res.StatusCode != http.StatusOK {
 		res.Body.Close()

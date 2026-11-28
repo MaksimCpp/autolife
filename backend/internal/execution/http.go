@@ -16,6 +16,14 @@ import (
 )
 
 func (s *Store) Routes(r chi.Router, auth, csrf func(http.Handler) http.Handler, owner func(*http.Request) string) {
+	r.With(auth, csrf).Post("/api/v1/executions", func(w http.ResponseWriter, r *http.Request) {
+		var req QuickStart
+		key, ok := decodeStart(w, r, &req)
+		if ok {
+			e, err := s.StartQuick(r.Context(), owner(r), key, req)
+			accepted(w, r, e, err)
+		}
+	})
 	for _, test := range []bool{false, true} {
 		path := "/api/v1/workflows/{id}/executions"
 		if test {
@@ -126,7 +134,7 @@ func (s *Store) Routes(r chi.Router, auth, csrf func(http.Handler) http.Handler,
 		httpserver.WriteJSON(w, 200, u)
 	})
 }
-func decodeStart(w http.ResponseWriter, r *http.Request, input *Start) (string, bool) {
+func decodeStart(w http.ResponseWriter, r *http.Request, input any) (string, bool) {
 	key := r.Header.Get("Idempotency-Key")
 	if len(key) == 0 || len(key) > 128 || strings.IndexFunc(key, func(ch rune) bool { return ch < 33 || ch > 126 }) != -1 {
 		httpserver.WriteError(w, r, 400, "IDEMPOTENCY_KEY_REQUIRED", "Use a valid Idempotency-Key")

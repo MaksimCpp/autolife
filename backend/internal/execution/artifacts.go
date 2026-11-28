@@ -16,6 +16,7 @@ type attemptScope struct {
 	store           *Store
 	execution       Execution
 	ordinal, number int
+	storage         *storageUsage
 }
 type attemptKey struct{}
 
@@ -115,7 +116,12 @@ func discardStages(ctx context.Context, tx pgx.Tx, id string, unfinishedOnly boo
 }
 
 func checkpointArtifacts(ctx context.Context, tx pgx.Tx, e Execution, ordinal, n int, refs []string) error {
-	for _, id := range refs {
+	var next int
+	if err := tx.QueryRow(ctx, `SELECT coalesce(max(position)+1,0) FROM platform.execution_file_refs
+	 WHERE execution_id=$1 AND role='output'`, e.ID).Scan(&next); err != nil {
+		return err
+	}
+	for index, id := range refs {
 		tag, err := tx.Exec(ctx, `UPDATE platform.execution_staged_files SET checkpoint=true
    WHERE execution_id=$1 AND file_id=$2 AND uploaded AND (checkpoint OR (ordinal=$3 AND attempt=$4 AND fence=$5))`, e.ID, id, ordinal, n, e.Fence)
 		if err != nil {
@@ -137,8 +143,8 @@ func checkpointArtifacts(ctx context.Context, tx pgx.Tx, e Execution, ordinal, n
 				pin = &newPin
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.execution_file_refs(owner_id,execution_id,file_id,live_file_id,pin_id,role)
-   VALUES($1,$2,$3,$3,$4,'output') ON CONFLICT DO NOTHING`, e.OwnerID, e.ID, id, pin); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.execution_file_refs(owner_id,execution_id,file_id,live_file_id,pin_id,role,position)
+   VALUES($1,$2,$3,$3,$4,'output',$5) ON CONFLICT DO NOTHING`, e.OwnerID, e.ID, id, pin, next+index); err != nil {
 			return err
 		}
 	}

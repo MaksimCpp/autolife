@@ -34,8 +34,16 @@ type actions struct {
 var pdf = workflow.Field{Kind: "file", Formats: []string{"application/pdf"}}
 
 func Register(registry *workflow.Registry, objects processing.Storage, launcher transformer) error {
+	return RegisterOperations(registry, objects, launcher, false)
+}
+
+func RegisterOperations(registry *workflow.Registry, objects processing.Storage, launcher transformer, rasterize bool) error {
 	a := actions{objects, launcher}
-	for _, op := range []string{"merge", "split", "extract", "create"} {
+	operations := []string{"merge", "split", "extract", "create"}
+	if rasterize {
+		operations = append(operations, "rasterize")
+	}
+	for _, op := range operations {
 		inputs, outputs, config := schemas(op)
 		pairs := []workflow.FormatPair{{Input: "application/pdf", Output: "application/pdf"}}
 		if op == "create" {
@@ -43,6 +51,9 @@ func Register(registry *workflow.Registry, objects processing.Storage, launcher 
 			for _, m := range []string{"image/jpeg", "image/png", "image/webp"} {
 				pairs = append(pairs, workflow.FormatPair{Input: m, Output: "application/pdf"})
 			}
+		}
+		if op == "rasterize" {
+			pairs = []workflow.FormatPair{{Input: "application/pdf", Output: "image/png"}, {Input: "application/pdf", Output: "image/jpeg"}}
 		}
 		err := registry.RegisterAction(workflow.ActionDefinition{
 			Descriptor: workflow.Descriptor{Key: workflow.Key{Type: "file.pdf." + op, Version: 1}, Config: config,
@@ -53,6 +64,22 @@ func Register(registry *workflow.Registry, objects processing.Storage, launcher 
 					return false, execution.ErrTemporary
 				}
 				return launcher.ConfirmStopped(ctx, id)
+			},
+			Ports: func(cfg workflow.Values) (workflow.Fields, workflow.Fields) {
+				if op == "rasterize" {
+					_, out, _ := schemas(op)
+					q := params(op, cfg)
+					field := out["files"]
+					if q.MaxRasterPages >= 1 && q.MaxRasterPages <= pdfproto.MaxPages {
+						field.MaxItems = q.MaxRasterPages
+					}
+					out["files"] = field
+					if q.Format == "png" || q.Format == "jpeg" {
+						out["files"].Items.Formats = []string{"image/" + q.Format}
+					}
+					return inputs, out
+				}
+				return inputs, outputs
 			},
 			SafeReplay: true,
 			ValidateConfig: func(cfg workflow.Values) []workflow.Problem {
@@ -79,6 +106,25 @@ func schemas(op string) (workflow.Fields, workflow.Fields, workflow.Fields) {
 	outputs := workflow.Fields{"pdf": pdf}
 	config := workflow.Fields{}
 	switch op {
+	case "rasterize":
+		inputs = workflow.Fields{"pdfs": {Kind: "array", Items: &pdf, MaxItems: pdfproto.MaxFiles}}
+		outputs = workflow.Fields{"files": {Kind: "array", MaxItems: pdfproto.MaxPages, Items: &workflow.Field{
+			Kind: "file", Formats: []string{"image/png", "image/jpeg"},
+		}}}
+		outputs["pages"] = workflow.Field{Kind: "array", MaxItems: pdfproto.MaxPages, Items: &workflow.Field{
+			Kind: "object", Properties: workflow.Fields{
+				"input_index": {Kind: "integer"}, "page": {Kind: "integer"},
+			},
+		}}
+		config = workflow.Fields{
+			"ranges":     {Kind: "array", Items: &workflow.Field{Kind: "string"}, Optional: true, MaxItems: pdfproto.MaxPages},
+			"format":     {Kind: "string", Enum: []string{"png", "jpeg"}},
+			"max_pages":  {Kind: "integer", Optional: true},
+			"dpi":        {Kind: "integer", Optional: true},
+			"quality":    {Kind: "integer", Optional: true},
+			"background": {Kind: "string", Optional: true},
+			"alpha":      {Kind: "boolean", Optional: true},
+		}
 	case "merge":
 		inputs = workflow.Fields{"pdfs": {Kind: "array", Items: &pdf, MaxItems: pdfproto.MaxFiles}}
 	case "split":
@@ -100,6 +146,15 @@ func schemas(op string) (workflow.Fields, workflow.Fields, workflow.Fields) {
 func params(op string, v workflow.Values) pdfproto.Request {
 	q := pdfproto.Request{Operation: op}
 	switch op {
+	case "rasterize":
+		q.DPI, q.Quality, q.MaxRasterPages, q.Background = 150, 85, 50, "#ffffff"
+		_ = json.Unmarshal(v["format"], &q.Format)
+		_ = json.Unmarshal(v["dpi"], &q.DPI)
+		_ = json.Unmarshal(v["max_pages"], &q.MaxRasterPages)
+		_ = json.Unmarshal(v["quality"], &q.Quality)
+		_ = json.Unmarshal(v["background"], &q.Background)
+		_ = json.Unmarshal(v["alpha"], &q.Alpha)
+		_ = json.Unmarshal(v["ranges"], &q.Ranges)
 	case "split", "extract":
 		_ = json.Unmarshal(v["ranges"], &q.Ranges)
 	case "create":
@@ -114,7 +169,7 @@ func params(op string, v workflow.Values) pdfproto.Request {
 func (a actions) run(ctx context.Context, op string, cfg, in workflow.Values) (workflow.Values, error) {
 	var ids []string
 	switch op {
-	case "merge":
+	case "merge", "rasterize":
 		_ = json.Unmarshal(in["pdfs"], &ids)
 	case "create":
 		_ = json.Unmarshal(in["images"], &ids)
@@ -132,7 +187,13 @@ func (a actions) run(ctx context.Context, op string, cfg, in workflow.Values) (w
 		return nil, execution.ErrInputs
 	}
 	q := params(op, cfg)
-	usage := execution.FileUsage{InputCount: len(ids), OutputFormat: "pdf"}
+	outputFormat, mime, signature := "pdf", "application/pdf", "%PDF-"
+	if op == "rasterize" {
+		outputFormat = q.Format
+		mime = "image/" + q.Format
+		signature = map[string]string{"png": "\x89PNG\r\n\x1a\n", "jpeg": "\xff\xd8\xff"}[q.Format]
+	}
+	usage := execution.FileUsage{InputCount: len(ids), OutputFormat: outputFormat}
 	_ = execution.ReportFileUsage(ctx, usage)
 	defer func() { _ = execution.ReportFileUsage(ctx, usage) }()
 	objects := make([]execution.Object, 0, len(ids))
@@ -165,8 +226,27 @@ func (a actions) run(ctx context.Context, op string, cfg, in workflow.Values) (w
 	}
 	defer result.Close()
 	body := &io.LimitedReader{R: result, N: declared}
+	var pages []pdfproto.SourcePage
+	if op == "rasterize" {
+		var n uint32
+		if binary.Read(body, binary.BigEndian, &n) != nil || n < 1 || n > uint32(q.MaxRasterPages) {
+			return nil, execution.ErrInputs
+		}
+		pages = make([]pdfproto.SourcePage, n)
+		if binary.Read(body, binary.BigEndian, pages) != nil {
+			return nil, execution.ErrInputs
+		}
+		var previous pdfproto.SourcePage
+		for _, page := range pages {
+			if page.Document < 1 || int(page.Document) > len(ids) || page.Page < 1 || page.Page > pdfproto.MaxPages ||
+				page.Document < previous.Document || page.Document == previous.Document && page.Page <= previous.Page {
+				return nil, execution.ErrInputs
+			}
+			previous = page
+		}
+	}
 	var count uint32
-	if err := binary.Read(body, binary.BigEndian, &count); err != nil || count < 1 || count > pdfproto.MaxPages || op != "split" && count != 1 {
+	if err := binary.Read(body, binary.BigEndian, &count); err != nil || count < 1 || count > pdfproto.MaxPages || op == "rasterize" && int(count) != len(pages) || op != "split" && op != "rasterize" && count != 1 {
 		return nil, execution.ErrInputs
 	}
 	outputs := make([]string, 0, count)
@@ -176,18 +256,21 @@ func (a actions) run(ctx context.Context, op string, cfg, in workflow.Values) (w
 			return nil, execution.ErrInputs
 		}
 		file := &io.LimitedReader{R: body, N: n}
-		var prefix [5]byte
-		if _, err := io.ReadFull(file, prefix[:]); err != nil || string(prefix[:]) != "%PDF-" {
+		prefix := make([]byte, len(signature))
+		if _, err := io.ReadFull(file, prefix); err != nil || string(prefix) != signature {
 			return nil, execution.ErrInputs
 		}
-		name := fmt.Sprintf("result-%03d.pdf", i+1)
-		id, err := processing.Stage(ctx, a.objects, io.MultiReader(bytes.NewReader(prefix[:]), file), n, name, "application/pdf")
+		name := fmt.Sprintf("result-%03d.%s", i+1, outputFormat)
+		id, err := processing.Stage(ctx, a.objects, io.MultiReader(bytes.NewReader(prefix[:]), file), n, name, mime)
 		if err != nil {
 			return nil, err
 		}
 		outputs = append(outputs, id)
 		usage.OutputBytes += n
 		usage.OutputCount++
+		if usage.OutputCount%10 == 0 {
+			_ = execution.ReportFileUsage(ctx, usage)
+		}
 	}
 	if body.N != 0 {
 		return nil, execution.ErrInputs
@@ -196,9 +279,13 @@ func (a actions) run(ctx context.Context, op string, cfg, in workflow.Values) (w
 	if _, err := io.ReadFull(result, extra[:]); err != io.EOF {
 		return nil, execution.ErrInputs
 	}
-	if op == "split" {
+	if op == "split" || op == "rasterize" {
 		raw, err := json.Marshal(outputs)
-		return workflow.Values{"files": raw}, err
+		values := workflow.Values{"files": raw}
+		if err == nil && op == "rasterize" {
+			values["pages"], err = json.Marshal(pages)
+		}
+		return values, err
 	}
 	raw, err := json.Marshal(outputs[0])
 	return workflow.Values{"pdf": raw}, err

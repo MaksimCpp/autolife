@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,19 @@ func main() {
 	if err != nil {
 		os.Exit(20)
 	}
-	outputs, err := perform(q, inputs)
+	var outputs []string
+	if q.Operation == "rasterize" {
+		var pages []pdfproto.SourcePage
+		outputs, pages, err = rasterize(q, inputs)
+		if err == nil {
+			err = binary.Write(os.Stdout, binary.BigEndian, uint32(len(pages)))
+		}
+		if err == nil {
+			err = binary.Write(os.Stdout, binary.BigEndian, pages)
+		}
+	} else {
+		outputs, err = perform(q, inputs)
+	}
 	if err != nil {
 		os.Exit(20)
 	}
@@ -142,6 +155,55 @@ func perform(q pdfproto.Request, inputs []input) ([]string, error) {
 		result = append(result, path)
 	}
 	return result, nil
+}
+
+func rasterize(q pdfproto.Request, inputs []input) ([]string, []pdfproto.SourcePage, error) {
+	type document struct {
+		Path  string
+		Pages []int
+	}
+	docs := make([]document, 0, len(inputs))
+	outputs := []string{}
+	var sourcePages []pdfproto.SourcePage
+	for inputIndex, in := range inputs {
+		pageGroups, err := pdfproto.Ranges(q.Ranges, in.pages)
+		if err != nil {
+			return nil, nil, err
+		}
+		selected := make([]bool, in.pages+1)
+		for _, pages := range pageGroups {
+			for _, page := range pages {
+				selected[page] = true
+			}
+		}
+		pages := []int{}
+		for page := 1; page <= in.pages; page++ {
+			if len(pageGroups) == 0 || selected[page] {
+				pages = append(pages, page)
+				if len(outputs) >= q.MaxRasterPages {
+					return nil, nil, pdfproto.ErrInvalid
+				}
+				sourcePages = append(sourcePages, pdfproto.SourcePage{Document: uint16(inputIndex + 1), Page: uint16(page)})
+				outputs = append(outputs, fmt.Sprintf("/work/result-%03d.%s", len(outputs)+1, q.Format))
+			}
+		}
+		docs = append(docs, document{in.path, pages})
+	}
+	raw, err := json.Marshal(struct {
+		Documents          []document
+		Format, Background string
+		DPI, Quality       int
+		Alpha              bool
+	}{docs, q.Format, q.Background, q.DPI, q.Quality, q.Alpha})
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd := exec.Command("python3", "/usr/local/lib/autolife/rasterize.py")
+	cmd.Stdin = bytes.NewReader(raw)
+	if err := cmd.Run(); err != nil {
+		return nil, nil, err
+	}
+	return outputs, sourcePages, nil
 }
 
 func selectPages(inputs []input, pages []int, out string) error {
